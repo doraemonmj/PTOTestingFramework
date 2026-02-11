@@ -9,6 +9,97 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np  # Used in lambda functions for op equivalents
 
 
+# 数据类型字节大小
+DTYPE_SIZES = {
+    "FP32": 4,
+    "FP16": 2,
+    "INT8": 1,
+    "INT32": 4,
+}
+
+
+def is_shape_aligned(shape: Tuple[int, int], dtype: str = "FP32") -> bool:
+    """检查形状是否满足32字节对齐约束
+
+    Args:
+        shape: (rows, cols) 形状元组
+        dtype: 数据类型 (默认 FP32)
+
+    Returns:
+        True 如果形状满足对齐要求
+
+    规则:
+        - 尾轴 (cols) 必须是 1, 或者
+        - (尾轴 * sizeof(dtype)) 必须是 32 的倍数
+
+    示例 (FP32, sizeof=4):
+        - (128, 1) ✓  尾轴=1
+        - (128, 8) ✓  8*4=32, 对齐
+        - (128, 16) ✓ 16*4=64, 对齐
+        - (128, 32) ✓ 32*4=128, 对齐
+        - (128, 5) ✗  5*4=20, 不对齐
+    """
+    rows, cols = shape
+    dtype_size = DTYPE_SIZES.get(dtype, 4)
+
+    # 尾轴是1，总是对齐
+    if cols == 1:
+        return True
+
+    # 检查 (尾轴 * sizeof(dtype)) 是否是32的倍数
+    return (cols * dtype_size) % 32 == 0
+
+
+def get_aligned_shapes(dtype: str = "FP32", max_size: int = 128) -> List[Tuple[int, int]]:
+    """获取所有满足对齐约束的常用形状
+
+    Args:
+        dtype: 数据类型 (默认 FP32)
+        max_size: 最大维度大小 (默认 128，避免内存溢出)
+
+    Returns:
+        对齐的形状列表
+    """
+    dtype_size = DTYPE_SIZES.get(dtype, 4)
+    # 计算最小对齐的列数 (除了1)
+    min_aligned_cols = 32 // dtype_size  # FP32: 8, FP16: 16, INT8: 32
+
+    aligned_shapes = []
+
+    # 常用行数 - 限制最大为 max_size
+    common_rows = [32, 64, 80, 96, 128]
+    common_rows = [r for r in common_rows if r <= max_size]
+
+    # 对齐的列数: 1, min_aligned_cols, 2*min_aligned_cols, ...
+    for rows in common_rows:
+        # 列数为1的情况
+        aligned_shapes.append((rows, 1))
+
+        # 对齐的列数
+        max_multiplier = max_size // min_aligned_cols
+        for multiplier in range(1, max_multiplier + 1):
+            cols = min_aligned_cols * multiplier
+            if cols <= max_size:
+                aligned_shapes.append((rows, cols))
+
+    return aligned_shapes
+
+
+def generate_aligned_shape(rng, dtype: str = "FP32", max_size: int = 128) -> Tuple[int, int]:
+    """随机生成一个对齐的形状
+
+    Args:
+        rng: 随机数生成器
+        dtype: 数据类型
+        max_size: 最大维度大小 (默认 128，避免内存溢出)
+
+    Returns:
+        满足对齐约束的形状元组
+    """
+    aligned_shapes = get_aligned_shapes(dtype, max_size)
+    return rng.choice(aligned_shapes) if aligned_shapes else (128, 128)
+
+
 @dataclass
 class OpSpec:
     """Operator specification for fuzzing.
@@ -60,6 +151,7 @@ class OpFuzzer:
         OpSpec("block.mul", ["tile", "tile"], "tile", {}, lambda a, b: a * b),
         OpSpec("block.div", ["tile", "tile"], "tile", {"avoid_zero": True}, lambda a, b: a / b),
         OpSpec("block.maximum", ["tile", "tile"], "tile", {}, lambda a, b: np.maximum(a, b)),
+        OpSpec("block.minimum", ["tile", "tile"], "tile", {}, lambda a, b: np.minimum(a, b)),
     ]
 
     # Block-level scalar operators
@@ -77,13 +169,52 @@ class OpFuzzer:
         OpSpec("block.exp", ["tile"], "tile", {}, lambda a: np.exp(np.clip(a, -10, 10))),
         OpSpec("block.neg", ["tile"], "tile", {}, lambda a: -a),
         OpSpec("block.recip", ["tile"], "tile", {"avoid_zero": True}, lambda a: 1.0 / a),
+        OpSpec("block.log", ["tile"], "tile", {"positive_only": True}, lambda a: np.log(a)),
+        OpSpec("block.abs", ["tile"], "tile", {}, lambda a: np.abs(a)),
+        OpSpec("block.relu", ["tile"], "tile", {}, lambda a: np.maximum(0, a)),
     ]
 
-    def __init__(self, seed: Optional[int] = None):
-        """Initialize fuzzer with optional seed for reproducibility."""
+    # Block-level row expand operators (需要特殊的形状处理)
+    # 注意: 这些操作需要第二个输入是 [M, 1] 形状
+    BLOCK_ROW_EXPAND_OPS = [
+        OpSpec("block.row_expand_add", ["tile", "tile"], "tile", {"row_vec_required": True},
+               lambda a, b: a + b),  # b is [M,1], broadcasts to [M,N]
+        OpSpec("block.row_expand_sub", ["tile", "tile"], "tile", {"row_vec_required": True},
+               lambda a, b: a - b),
+        OpSpec("block.row_expand_mul", ["tile", "tile"], "tile", {"row_vec_required": True},
+               lambda a, b: a * b),
+        OpSpec("block.row_expand_div", ["tile", "tile"], "tile", {"row_vec_required": True, "avoid_zero": True},
+               lambda a, b: a / b),
+    ]
+
+    # Block-level reduction operators (改变形状)
+    # axis=1: 沿最后一个轴归约, [M,N] -> [M,1]
+    BLOCK_REDUCTION_OPS = [
+        # 注意: row_sum, row_max, row_min 需要一个临时tile参数
+        # 为了简化,这里先不包含它们,或者使用 sum/max/min with axis参数
+    ]
+
+    # Block-level matrix operators
+    BLOCK_MATRIX_OPS = [
+        OpSpec("block.matmul", ["tile", "tile"], "tile", {"matmul_shape": True},
+               lambda a, b: a @ b,
+               shape_transform=lambda shapes, params=None: (shapes[0][0], shapes[1][1]) if len(shapes) >= 2 else shapes[0]),
+    ]
+
+    def __init__(self, seed: Optional[int] = None, enable_advanced_ops: bool = False):
+        """Initialize fuzzer with optional seed for reproducibility.
+
+        Args:
+            seed: Random seed for reproducibility
+            enable_advanced_ops: Enable advanced operations like row_expand, matmul (default: False)
+        """
         self.rng = random.Random(seed)
-        # 使用所有操作符
+        # 基础操作符集合
         self.ops = self.BLOCK_BINARY_OPS + self.BLOCK_SCALAR_OPS + self.BLOCK_UNARY_OPS
+
+        # 可选: 启用高级操作符
+        if enable_advanced_ops:
+            self.ops = self.ops + self.BLOCK_ROW_EXPAND_OPS + self.BLOCK_MATRIX_OPS
 
     def generate_op_chain(
         self,

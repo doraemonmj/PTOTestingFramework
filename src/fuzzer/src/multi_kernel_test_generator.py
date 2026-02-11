@@ -21,16 +21,18 @@ from .orchestrator_generator import OrchestratorGenerator
 class MultiKernelTestGenerator:
     """生成多内核测试用例的生成器"""
 
-    def __init__(self, seed: Optional[int] = None):
+    def __init__(self, seed: Optional[int] = None, enable_advanced_ops: bool = False):
         """初始化测试生成器
 
         Args:
             seed: 随机种子，用于可重现性
+            enable_advanced_ops: 启用高级算子（row_expand, matmul等）
         """
         self.seed = seed
-        self.kernel_gen = KernelGenerator(seed=seed)
+        self.enable_advanced_ops = enable_advanced_ops
+        self.kernel_gen = KernelGenerator(seed=seed, enable_advanced_ops=enable_advanced_ops)
         self.orch_gen = OrchestratorGenerator(seed=seed)
-        self.fuzzer = OpFuzzer(seed=seed)
+        self.fuzzer = OpFuzzer(seed=seed, enable_advanced_ops=enable_advanced_ops)
 
     def _compute_output_shapes_for_sequential(
         self,
@@ -149,15 +151,18 @@ class MultiKernelTestGenerator:
         for inp_name, _ in kernel["inputs"]:
             unified_shape = input_shapes_map[inp_name]
             params.append(f"{inp_name}: pl.Tensor[[{unified_shape[0]}, {unified_shape[1]}], pl.FP32]")
+        # 添加 output_tensor 参数
+        params.append(f"output: pl.Tensor[[{rows}, {cols}], pl.FP32]")
 
         code_lines = [
             f"    @pl.function(type=pl.FunctionType.InCore)",
             f"    def {kernel_name}(self, {', '.join(params)}) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:",
         ]
 
-        # 加载输入张量 - 使用输出形状作为加载大小
+        # 加载输入张量 - 使用每个输入的实际定义形状
         for inp_name, _ in kernel["inputs"]:
-            code_lines.append(f"        tile_{inp_name} = pl.op.block.load({inp_name}, 0, 0, {rows}, {cols})")
+            inp_shape = input_shapes_map[inp_name]
+            code_lines.append(f"        tile_{inp_name} = pl.load({inp_name}, offsets=[0, 0], shapes=[{inp_shape[0]}, {inp_shape[1]}])")
 
         # 生成操作链
         for op_dict in op_chain:
@@ -166,20 +171,25 @@ class MultiKernelTestGenerator:
             output = op_dict["output"]
             params_dict = op_dict.get("params")
 
+            # 去掉 block. 前缀，直接使用 pl.xxx
+            op_name = op.name.replace("block.", "")
+
             if params_dict:
                 params_str = ", ".join(f"{k}={v}" for k, v in params_dict.items())
-                code_lines.append(f"        {output} = pl.op.{op.name}({inputs_str}, {params_str})")
+                code_lines.append(f"        {output} = pl.{op_name}({inputs_str}, {params_str})")
             else:
-                code_lines.append(f"        {output} = pl.op.{op.name}({inputs_str})")
+                code_lines.append(f"        {output} = pl.{op_name}({inputs_str})")
 
-        # 返回最终结果
+        # Store 结果并返回
         if op_chain:
             last_output = op_chain[-1]["output"]
-            code_lines.append(f"        return {last_output}")
+            code_lines.append(f"        result = pl.store({last_output}, offsets=[0, 0], shapes=[{rows}, {cols}], output_tensor=output)")
+            code_lines.append(f"        return result")
         else:
-            # 如果没有操作，返回第一个输入
+            # 如果没有操作，直接 store 第一个输入
             first_input = kernel["inputs"][0][0]
-            code_lines.append(f"        return tile_{first_input}")
+            code_lines.append(f"        result = pl.store(tile_{first_input}, offsets=[0, 0], shapes=[{rows}, {cols}], output_tensor=output)")
+            code_lines.append(f"        return result")
 
         return "\n".join(code_lines)
 
@@ -269,7 +279,8 @@ class MultiKernelTestGenerator:
             input_names = [inp[0] for inp in kernel["inputs"]]
             op_chain = kernel["op_chain"]
 
-            code_lines.append(f"    def _numpy_{kernel_name}(self, {', '.join(input_names)}):")
+            # 嵌套函数不需要 self 参数
+            code_lines.append(f"    def _numpy_{kernel_name}({', '.join(input_names)}):")
             code_lines.append(f"        \"\"\"NumPy 实现: {kernel_name}\"\"\"")
 
             # 生成 NumPy 操作
@@ -325,6 +336,7 @@ class MultiKernelTestGenerator:
             NumPy 操作表达式字符串
         """
         # 根据操作类型生成表达式
+        # 二元操作
         if op_name == "block.add":
             return f"{input_vals[0]} + {input_vals[1]}"
         elif op_name == "block.sub":
@@ -335,6 +347,9 @@ class MultiKernelTestGenerator:
             return f"{input_vals[0]} / {input_vals[1]}"
         elif op_name == "block.maximum":
             return f"np.maximum({input_vals[0]}, {input_vals[1]})"
+        elif op_name == "block.minimum":
+            return f"np.minimum({input_vals[0]}, {input_vals[1]})"
+        # 标量操作
         elif op_name == "block.adds":
             return f"{input_vals[0]} + {input_vals[1]}"
         elif op_name == "block.subs":
@@ -343,6 +358,7 @@ class MultiKernelTestGenerator:
             return f"{input_vals[0]} * {input_vals[1]}"
         elif op_name == "block.divs":
             return f"{input_vals[0]} / {input_vals[1]}"
+        # 一元操作
         elif op_name == "block.sqrt":
             return f"np.sqrt({input_vals[0]})"
         elif op_name == "block.rsqrt":
@@ -353,6 +369,24 @@ class MultiKernelTestGenerator:
             return f"-{input_vals[0]}"
         elif op_name == "block.recip":
             return f"1.0 / {input_vals[0]}"
+        elif op_name == "block.log":
+            return f"np.log({input_vals[0]})"
+        elif op_name == "block.abs":
+            return f"np.abs({input_vals[0]})"
+        elif op_name == "block.relu":
+            return f"np.maximum(0, {input_vals[0]})"
+        # Row expand 操作
+        elif op_name == "block.row_expand_add":
+            return f"{input_vals[0]} + {input_vals[1]}"  # Broadcasting
+        elif op_name == "block.row_expand_sub":
+            return f"{input_vals[0]} - {input_vals[1]}"
+        elif op_name == "block.row_expand_mul":
+            return f"{input_vals[0]} * {input_vals[1]}"
+        elif op_name == "block.row_expand_div":
+            return f"{input_vals[0]} / {input_vals[1]}"
+        # 矩阵操作
+        elif op_name == "block.matmul":
+            return f"{input_vals[0]} @ {input_vals[1]}"
         else:
             return f"# 未知操作: {op_name}"
 
@@ -466,7 +500,13 @@ class MultiKernelTestGenerator:
         # 添加 NumPy 参考实现
         code_lines.append(f"    def compute_expected(self, tensors, params=None):")
         code_lines.append(f"        \"\"\"使用 NumPy 计算期望输出\"\"\"")
-        code_lines.append(numpy_code)
+        # numpy_code 包含嵌套函数定义，需要添加到 compute_expected 内部，所以需要额外缩进
+        numpy_lines = numpy_code.split('\n')
+        for line in numpy_lines:
+            if line.strip():  # 跳过空行
+                code_lines.append(f"    {line}")  # 添加额外的4个空格缩进
+            else:
+                code_lines.append(line)
         code_lines.append(f"")
 
         # 根据组合模式生成计算逻辑
@@ -490,7 +530,8 @@ class MultiKernelTestGenerator:
                     inputs_str = ", ".join([f"tensors['{inp}']" for inp in kernel_inputs])
 
                 result_var = f"result_{i}"
-                code_lines.append(f"        {result_var} = self._numpy_{kernel_name}({inputs_str})")
+                # 调用嵌套函数不需要 self
+                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
 
             code_lines.append(f"        tensors['output'][:] = {result_var}")
 
@@ -504,7 +545,8 @@ class MultiKernelTestGenerator:
                 branch_results.append(result_var)
 
                 inputs_str = ", ".join([f"tensors['{inp}']" for inp in kernel_inputs])
-                code_lines.append(f"        {result_var} = self._numpy_{kernel_name}({inputs_str})")
+                # 调用嵌套函数不需要 self
+                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
 
             # 合并结果
             if len(branch_results) == 1:
@@ -532,7 +574,8 @@ class MultiKernelTestGenerator:
                 branch_results.append(result_var)
 
                 inputs_str = ", ".join([f"tensors['{inp}']" for inp in kernel_inputs])
-                code_lines.append(f"        {result_var} = self._numpy_{kernel_name}({inputs_str})")
+                # 调用嵌套函数不需要 self
+                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
 
             # 合并并行结果
             if len(branch_results) > 1:
@@ -557,7 +600,8 @@ class MultiKernelTestGenerator:
                 for inp in kernel_inputs[1:]:
                     inputs_parts.append(f"tensors['{inp}']")
                 inputs_str = ", ".join(inputs_parts)
-                code_lines.append(f"        {result_var} = self._numpy_{kernel_name}({inputs_str})")
+                # 调用嵌套函数不需要 self
+                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
                 current_result = result_var
 
             code_lines.append(f"        tensors['output'][:] = {current_result}")

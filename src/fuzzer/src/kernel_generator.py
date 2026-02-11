@@ -8,20 +8,21 @@ InCore 内核函数生成器
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
-from .fuzzer import OpFuzzer
+from .fuzzer import OpFuzzer, is_shape_aligned, generate_aligned_shape
 
 
 class KernelGenerator:
     """生成 InCore 内核函数的生成器"""
 
-    def __init__(self, seed: Optional[int] = None):
+    def __init__(self, seed: Optional[int] = None, enable_advanced_ops: bool = False):
         """初始化内核生成器
 
         Args:
             seed: 随机种子，用于可重现性
+            enable_advanced_ops: 启用高级算子（row_expand, matmul等）
         """
         self.rng = random.Random(seed)
-        self.fuzzer = OpFuzzer(seed=seed)
+        self.fuzzer = OpFuzzer(seed=seed, enable_advanced_ops=enable_advanced_ops)
 
     def generate_kernel(
         self,
@@ -60,24 +61,35 @@ class KernelGenerator:
             actual_num_inputs = num_inputs
             actual_shapes = [shape] * num_inputs
 
+        # 验证所有形状是否满足对齐约束
+        dtype = "FP32"  # 当前仅支持 FP32
+        for i, input_shape in enumerate(actual_shapes):
+            if not is_shape_aligned(input_shape, dtype):
+                # 如果形状不对齐，使用最接近的对齐形状
+                print(f"Warning: Input shape {input_shape} is not 32-byte aligned. Regenerating aligned shape.")
+                actual_shapes[i] = generate_aligned_shape(self.rng, dtype)
+
+        # 确定输出形状并验证对齐
+        if output_shape is not None:
+            actual_output_shape = output_shape
+            if not is_shape_aligned(actual_output_shape, dtype):
+                print(f"Warning: Output shape {actual_output_shape} is not 32-byte aligned. Regenerating aligned shape.")
+                actual_output_shape = generate_aligned_shape(self.rng, dtype)
+        else:
+            actual_output_shape = actual_shapes[0]
+
         # 生成操作链
         op_chain = self.fuzzer.generate_op_chain(
             num_ops=num_ops,
             input_count=actual_num_inputs,
             allow_scalars=allow_scalars,
             track_shapes=False,
-            default_shape=shape,
+            default_shape=actual_output_shape,
         )
 
         # 生成输入参数
         input_names = [chr(97 + i) for i in range(actual_num_inputs)]  # a, b, c, ...
         inputs = [(name, actual_shapes[i]) for i, name in enumerate(input_names)]
-
-        # 确定输出形状：优先使用指定的 output_shape，否则使用第一个输入的形状
-        if output_shape is not None:
-            actual_output_shape = output_shape
-        else:
-            actual_output_shape = actual_shapes[0]
 
         # 生成内核代码
         code = self._generate_kernel_code(
@@ -115,10 +127,12 @@ class KernelGenerator:
         """
         rows, cols = output_shape
 
-        # 生成函数签名
+        # 生成函数签名 - 添加 output_tensor 参数
         params = []
         for name, (r, c) in inputs:
             params.append(f"{name}: pl.Tensor[[{r}, {c}], pl.FP32]")
+        # 添加 output_tensor 参数
+        params.append(f"output: pl.Tensor[[{rows}, {cols}], pl.FP32]")
 
         code_lines = [
             f"    @pl.function(type=pl.FunctionType.InCore)",
@@ -127,7 +141,7 @@ class KernelGenerator:
 
         # 加载输入张量 - 使用输出形状作为加载大小
         for name, (r, c) in inputs:
-            code_lines.append(f"        tile_{name} = pl.op.block.load({name}, 0, 0, {rows}, {cols})")
+            code_lines.append(f"        tile_{name} = pl.load({name}, offsets=[0, 0], shapes=[{rows}, {cols}])")
 
         # 生成操作链
         for op_dict in op_chain:
@@ -136,20 +150,25 @@ class KernelGenerator:
             output = op_dict["output"]
             params = op_dict.get("params")
 
+            # 去掉 block. 前缀，直接使用 pl.xxx
+            op_name = op.name.replace("block.", "")
+
             if params:
                 params_str = ", ".join(f"{k}={v}" for k, v in params.items())
-                code_lines.append(f"        {output} = pl.op.{op.name}({inputs_str}, {params_str})")
+                code_lines.append(f"        {output} = pl.{op_name}({inputs_str}, {params_str})")
             else:
-                code_lines.append(f"        {output} = pl.op.{op.name}({inputs_str})")
+                code_lines.append(f"        {output} = pl.{op_name}({inputs_str})")
 
-        # 返回最终结果
+        # Store 结果并返回
         if op_chain:
             last_output = op_chain[-1]["output"]
-            code_lines.append(f"        return {last_output}")
+            code_lines.append(f"        result = pl.store({last_output}, offsets=[0, 0], shapes=[{rows}, {cols}], output_tensor=output)")
+            code_lines.append(f"        return result")
         else:
-            # 如果没有操作，返回第一个输入
+            # 如果没有操作，直接 store 第一个输入
             first_input = inputs[0][0]
-            code_lines.append(f"        return tile_{first_input}")
+            code_lines.append(f"        result = pl.store(tile_{first_input}, offsets=[0, 0], shapes=[{rows}, {cols}], output_tensor=output)")
+            code_lines.append(f"        return result")
 
         return "\n".join(code_lines)
 

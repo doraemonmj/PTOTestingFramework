@@ -61,6 +61,12 @@ def main():
         help="随机种子，用于可重现性 (默认: 42)"
     )
 
+    parser.add_argument(
+        "--enable-advanced-ops",
+        action="store_true",
+        help="启用高级算子 (row_expand, matmul等)"
+    )
+
     args = parser.parse_args()
 
     # 设置输出路径
@@ -73,6 +79,7 @@ def main():
     print(f"=" * 60)
     print(f"测试用例数量: {args.num_cases}")
     print(f"随机种子: {args.seed}")
+    print(f"启用高级算子: {'是' if args.enable_advanced_ops else '否'}")
     print(f"输出文件: {output_path}")
     print(f"=" * 60)
     print()
@@ -86,10 +93,10 @@ def main():
             "shape": (128, 128),
             "num_ops_range": (3, 5),
             "input_shapes_list": [
-                [(128, 128), (64, 64)],  # kernel_0: 2个不同维度的输入
-                [(128, 128), (128, 128), (256, 256)],  # kernel_1: 3个不同维度的输入
+                [(128, 128), (128, 128)],  # kernel_0: 2个相同维度的输入
+                [(128, 128), (128, 128), (128, 128)],  # kernel_1: 3个相同维度的输入
             ],
-            "description": "简单顺序执行：2个内核，不同维度输入"
+            "description": "简单顺序执行：2个内核，相同维度输入"
         },
         {
             "name": "fuzz_branching_parallel",
@@ -99,10 +106,10 @@ def main():
             "num_ops_range": (4, 6),
             "input_shapes_list": [
                 [(128, 128), (128, 128)],  # kernel_0: 2个相同维度
-                [(64, 64), (128, 128)],    # kernel_1: 2个不同维度
-                [(256, 256)],              # kernel_2: 1个输入
+                [(128, 128), (128, 128)],  # kernel_1: 2个相同维度
+                [(128, 128)],              # kernel_2: 1个输入
             ],
-            "description": "分支并行执行：3个内核，不同输入数量"
+            "description": "分支并行执行：3个内核，相同维度输入"
         },
         {
             "name": "fuzz_mixed_complex",
@@ -129,12 +136,12 @@ def main():
             "shape": (128, 128),
             "num_ops_range": (4, 7),
             "input_shapes_list": [
-                [(128, 128), (64, 64), (256, 256)],  # kernel_0: 3个不同维度
-                [(128, 128)],                        # kernel_1: 1个输入
-                [(64, 64), (64, 64)],                # kernel_2: 2个相同维度
-                [(256, 256), (128, 128)],            # kernel_3: 2个不同维度
+                [(128, 128), (128, 128), (128, 128)],  # kernel_0: 3个相同维度
+                [(128, 128)],                          # kernel_1: 1个输入
+                [(128, 128), (128, 128)],              # kernel_2: 2个相同维度
+                [(128, 128), (128, 128)],              # kernel_3: 2个相同维度
             ],
-            "description": "宽分支执行：4个内核，多样化输入配置"
+            "description": "宽分支执行：4个内核，统一维度输入"
         },
     ]
 
@@ -149,7 +156,7 @@ def main():
         print()
 
     # 创建生成器
-    generator = MultiKernelTestGenerator(seed=args.seed)
+    generator = MultiKernelTestGenerator(seed=args.seed, enable_advanced_ops=args.enable_advanced_ops)
 
     # 生成测试文件
     print("正在生成测试文件...")

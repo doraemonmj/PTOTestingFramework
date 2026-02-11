@@ -40,7 +40,7 @@ class TestFuzzSequentialSimple(PTOTestCase):
         return [
             TensorSpec('a', [128, 128], DataType.FP32, init_value=2.0),
             TensorSpec('b', [128, 128], DataType.FP32, init_value=2.5),
-            TensorSpec('c', [256, 256], DataType.FP32, init_value=3.0),
+            TensorSpec('c', [128, 128], DataType.FP32, init_value=3.0),
             TensorSpec('output', [128, 128], DataType.FP32, is_output=True),
         ]
 
@@ -50,28 +50,31 @@ class TestFuzzSequentialSimple(PTOTestCase):
         @pl.program
         class FuzzSequentialSimpleProgram:
             @pl.function(type=pl.FunctionType.InCore)
-            def kernel_0(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a = pl.op.block.load(a, 0, 0, 128, 128)
-                tile_b = pl.op.block.load(b, 0, 0, 128, 128)
-                tmp_0 = pl.op.block.div(tile_b, tile_a)
-                tmp_1 = pl.op.block.sub(tmp_0, tile_a)
-                tmp_2 = pl.op.block.div(tmp_1, tile_b)
-                return tmp_2
+            def kernel_0(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+                tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
+                tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
+                tmp_0 = pl.subs(tile_b, 1.0)
+                tmp_1 = pl.mul(tile_a, tile_a)
+                tmp_2 = pl.subs(tmp_1, 1.0)
+                tmp_3 = pl.add(tmp_0, tmp_2)
+                result = pl.store(tmp_3, offsets=[0, 0], shapes=[128, 128], output_tensor=output)
+                return result
 
             @pl.function(type=pl.FunctionType.InCore)
-            def kernel_1(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[256, 256], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
-                tile_a = pl.op.block.load(a, 0, 0, 128, 128)
-                tile_b = pl.op.block.load(b, 0, 0, 128, 128)
-                tile_c = pl.op.block.load(c, 0, 0, 128, 128)
-                tmp_0 = pl.op.block.add(tile_a, tile_c)
-                tmp_1 = pl.op.block.neg(tile_b)
-                tmp_2 = pl.op.block.maximum(tmp_1, tmp_1)
-                tmp_3 = pl.op.block.rsqrt(tmp_0)
-                tmp_4 = pl.op.block.add(tmp_2, tmp_3)
-                return tmp_4
+            def kernel_1(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+                tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
+                tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
+                tile_c = pl.load(c, offsets=[0, 0], shapes=[128, 128])
+                tmp_0 = pl.add(tile_a, tile_c)
+                tmp_1 = pl.muls(tile_b, 0.5)
+                tmp_2 = pl.rsqrt(tmp_1)
+                tmp_3 = pl.exp(tmp_0)
+                tmp_4 = pl.add(tmp_2, tmp_3)
+                result = pl.store(tmp_4, offsets=[0, 0], shapes=[128, 128], output_tensor=output)
+                return result
 
             @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[256, 256], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+            def orchestrator(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
                 result_0 = self.kernel_0(a, b)
                 result_1 = self.kernel_1(result_0, b, c)
                 return result_1
@@ -80,44 +83,41 @@ class TestFuzzSequentialSimple(PTOTestCase):
 
     def compute_expected(self, tensors, params=None):
         """使用 NumPy 计算期望输出"""
-    def _numpy_kernel_0(self, a, b):
-        """NumPy 实现: kernel_0"""
-        # 创建变量环境
-        env = {}
-        env['tile_a'] = a.copy()
-        env['tile_b'] = b.copy()
+        def _numpy_kernel_0(a, b):
+            """NumPy 实现: kernel_0"""
+            # 创建变量环境
+            env = {}
+            env['tile_a'] = a.copy()
+            env['tile_b'] = b.copy()
 
-        # 执行操作链
-        env['tile_b'] = np.where(np.abs(env['tile_b']) < 0.01, 1.0, env['tile_b'])
-        env['tile_a'] = np.where(np.abs(env['tile_a']) < 0.01, 1.0, env['tile_a'])
-        env['tmp_0'] = env['tile_b'] / env['tile_a']
-        env['tmp_1'] = env['tmp_0'] - env['tile_a']
-        env['tmp_1'] = np.where(np.abs(env['tmp_1']) < 0.01, 1.0, env['tmp_1'])
-        env['tile_b'] = np.where(np.abs(env['tile_b']) < 0.01, 1.0, env['tile_b'])
-        env['tmp_2'] = env['tmp_1'] / env['tile_b']
-        return env['tmp_2']
+            # 执行操作链
+            env['tmp_0'] = env['tile_b'] - 1.0
+            env['tmp_1'] = env['tile_a'] * env['tile_a']
+            env['tmp_2'] = env['tmp_1'] - 1.0
+            env['tmp_3'] = env['tmp_0'] + env['tmp_2']
+            return env['tmp_3']
 
-    def _numpy_kernel_1(self, a, b, c):
-        """NumPy 实现: kernel_1"""
-        # 创建变量环境
-        env = {}
-        env['tile_a'] = a.copy()
-        env['tile_b'] = b.copy()
-        env['tile_c'] = c.copy()
+        def _numpy_kernel_1(a, b, c):
+            """NumPy 实现: kernel_1"""
+            # 创建变量环境
+            env = {}
+            env['tile_a'] = a.copy()
+            env['tile_b'] = b.copy()
+            env['tile_c'] = c.copy()
 
-        # 执行操作链
-        env['tmp_0'] = env['tile_a'] + env['tile_c']
-        env['tmp_1'] = -env['tile_b']
-        env['tmp_2'] = np.maximum(env['tmp_1'], env['tmp_1'])
-        env['tmp_0'] = np.abs(env['tmp_0']) + 1e-6
-        env['tmp_3'] = 1.0 / np.sqrt(env['tmp_0'])
-        env['tmp_4'] = env['tmp_2'] + env['tmp_3']
-        return env['tmp_4']
+            # 执行操作链
+            env['tmp_0'] = env['tile_a'] + env['tile_c']
+            env['tmp_1'] = env['tile_b'] * 0.5
+            env['tmp_1'] = np.abs(env['tmp_1']) + 1e-6
+            env['tmp_2'] = 1.0 / np.sqrt(env['tmp_1'])
+            env['tmp_3'] = np.exp(np.clip(env['tmp_0'], -10, 10))
+            env['tmp_4'] = env['tmp_2'] + env['tmp_3']
+            return env['tmp_4']
 
 
         # 顺序执行模式
-        result_0 = self._numpy_kernel_0(tensors['a'], tensors['b'])
-        result_1 = self._numpy_kernel_1(result_0, tensors['b'], tensors['c'])
+        result_0 = _numpy_kernel_0(tensors['a'], tensors['b'])
+        result_1 = _numpy_kernel_1(result_0, tensors['b'], tensors['c'])
         tensors['output'][:] = result_1
 
 

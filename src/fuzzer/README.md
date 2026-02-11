@@ -6,8 +6,9 @@
 
 ## 快速开始
 
+### 基础示例 (基本算子)
 ```bash
-# 生成1个测试用例
+# 生成1个测试用例 (使用基础算子: add, mul, div, sqrt, exp等)
 python src/fuzzer/example_multi_kernel.py --num-cases 1
 
 # 生成5个测试用例
@@ -19,6 +20,26 @@ pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only
 # 查看生成的 C++ 代码
 pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only --save-kernels --kernels-dir=/tmp/kernels
 ```
+
+**说明**: 基础示例默认使用以下算子:
+- 二元: add, sub, mul, div, maximum, minimum
+- 标量: adds, subs, muls, divs
+- 一元: sqrt, rsqrt, exp, neg, recip, log, abs, relu
+
+### 高级示例 (row_expand, matmul 等高级算子)
+```bash
+# 生成使用高级算子的测试用例
+python src/fuzzer/example_multi_kernel.py --num-cases 3 --enable-advanced-ops
+
+# 运行高级算子测试
+pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only
+```
+
+**高级算子包括**:
+- Row expand: row_expand_add, row_expand_sub, row_expand_mul, row_expand_div
+- Matrix: matmul
+
+**注意**: 使用 row_expand 算子时，请确保输入形状正确配置（第二个输入应为 [M, 1] 形状）。
 
 ## 目录结构
 
@@ -40,29 +61,45 @@ src/fuzzer/                          # 独立的模糊测试框架
 
 ## Op 组合规则
 
+**详细规则文档**: 请参考 [OP_RULES.md](OP_RULES.md) 获取完整的算子规则和组合模式。
+
 ### 1. 操作符定义
 
-操作符在 [fuzzer.py](fuzzer.py) 的 `OpFuzzer.__init__` 方法中定义。
+操作符在 [src/fuzzer.py](src/fuzzer.py) 的 `OpFuzzer.__init__` 方法中定义。
 
 **当前支持的操作**：
-- **二元操作**: `block.add`, `block.sub`, `block.mul`, `block.div`, `block.maximum`
+- **二元操作**: `block.add`, `block.sub`, `block.mul`, `block.div`, `block.maximum`, `block.minimum`
 - **标量操作**: `block.adds`, `block.subs`, `block.muls`, `block.divs`
-- **一元操作**: `block.sqrt`, `block.rsqrt`, `block.exp`, `block.neg`, `block.recip`
+- **一元操作**: `block.sqrt`, `block.rsqrt`, `block.exp`, `block.neg`, `block.recip`, `block.log`, `block.abs`, `block.relu`
+- **行广播操作** (高级): `block.row_expand_add`, `block.row_expand_sub`, `block.row_expand_mul`, `block.row_expand_div`
+- **矩阵操作** (高级): `block.matmul`
+
+**启用高级操作**：
+```python
+# 在生成器中启用高级操作
+from src.fuzzer.src.fuzzer import OpFuzzer
+
+# 启用行广播和矩阵操作
+fuzzer = OpFuzzer(seed=42, enable_advanced_ops=True)
+```
 
 **添加新操作**：
 ```python
-# 在 fuzzer.py 的 OpFuzzer.__init__ 中修改
-self.ops = self.BLOCK_BINARY_OPS + self.BLOCK_SCALAR_OPS + self.BLOCK_UNARY_OPS
-
-# 或者只使用基础操作
-basic_ops = [
-    OpSpec("block.add", ["tile", "tile"], "tile", {}, lambda a, b: a + b),
-    OpSpec("block.sub", ["tile", "tile"], "tile", {}, lambda a, b: a - b),
-    OpSpec("block.mul", ["tile", "tile"], "tile", {}, lambda a, b: a * b),
-    OpSpec("block.div", ["tile", "tile"], "tile", {"avoid_zero": True}, lambda a, b: a / b),
+# 在 fuzzer.py 中定义新操作
+CUSTOM_OPS = [
+    OpSpec("block.custom_op", ["tile", "tile"], "tile", {}, lambda a, b: custom_numpy_impl(a, b)),
 ]
-self.ops = basic_ops
+
+# 在 __init__ 中添加
+self.ops = self.ops + CUSTOM_OPS
 ```
+
+**操作符约束**：
+- `avoid_zero`: 用于除法操作,确保分母不为零
+- `positive_only`: 用于 sqrt, log 等操作,确保输入为正数
+- `row_vec_shape`: 用于 row_expand 操作,要求第二个输入形状为 [M,1]
+
+更多详情请查看 [OP_RULES.md](OP_RULES.md) 中的完整算子列表和约束说明。
 
 ### 2. 内核生成规则
 
@@ -103,11 +140,11 @@ self.ops = basic_ops
 # 生成的内核代码 - 不同维度的输入
 @pl.function(type=pl.FunctionType.InCore)
 def kernel_0(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
-    tile_a = pl.op.block.load(a, 0, 0, 128, 128)
-    tile_b = pl.op.block.load(b, 0, 0, 128, 128)  # 加载到输出大小
-    tmp_0 = pl.op.block.add(tile_b, tile_a)      # 操作1: b + a
-    tmp_1 = pl.op.block.mul(tmp_0, tile_a)       # 操作2: tmp_0 * a
-    tmp_2 = pl.op.block.sub(tmp_1, tile_b)       # 操作3: tmp_1 - b
+    tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
+    tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])  # 加载到输出大小
+    tmp_0 = pl.add(tile_b, tile_a)      # 操作1: b + a
+    tmp_1 = pl.mul(tmp_0, tile_a)       # 操作2: tmp_0 * a
+    tmp_2 = pl.sub(tmp_1, tile_b)       # 操作3: tmp_1 - b
     return tmp_2
 ```
 
@@ -161,6 +198,36 @@ OpSpec(
 - `shape_transform`: shape 变换函数（可选）
 - `param_generator`: 参数生成函数（可选）
 - `requires_params`: 是否需要参数
+
+### 5. 常见算子组合模式
+
+参考 [OP_RULES.md](OP_RULES.md) 第 2.2 节获取完整的算子组合模式，包括：
+
+#### Softmax 模式
+```python
+# 1. Row max reduction
+max_vals = pl.row_max(tile, tmp_tile)
+# 2. Subtract max for numerical stability
+centered = pl.row_expand_sub(tile, max_vals)
+# 3. Exponential
+exp_vals = pl.exp(centered)
+# 4. Row sum
+sum_vals = pl.row_sum(exp_vals, tmp_tile)
+# 5. Normalize
+output = pl.row_expand_div(exp_vals, sum_vals)
+```
+
+#### ReLU 及变体
+```python
+# ReLU
+output = pl.relu(tile)
+
+# LeakyReLU (alpha=0.01)
+neg_part = pl.muls(tile, 0.01)
+output = pl.maximum(tile, neg_part)
+```
+
+更多模式请参考 [OP_RULES.md](OP_RULES.md)。
 
 ## 命令行参数
 
@@ -250,11 +317,21 @@ self.ops = custom_ops
 
 ## 注意事项
 
-1. **张量形状**: 支持不同维度的输入张量，可以在配置中指定每个内核的输入形状
-2. **数据类型**: 当前仅支持 FP32 类型
-3. **操作约束**: 框架自动处理除零、负数开方等约束
-4. **ISA 支持**: 确保添加的操作在目标硬件的 ISA 中有对应实现
-5. **输入数量**: 每个内核支持 1-3 个输入张量，可以在配置中指定
+1. **32字节对齐约束**: 所有 tensor 创建和 reshape 操作的形状必须满足32字节对齐
+   - 形状尾轴(列数)必须是 1，或 `(cols * sizeof(dtype)) % 32 == 0`
+   - FP32 类型有效的列数: 1, 8, 16, 24, 32, 40, 48, 56, 64, ..., 128, ...
+   - Fuzzer 会自动验证并修正不对齐的形状
+   - 详见 [OP_RULES.md](OP_RULES.md) 第 0 节
+
+2. **张量形状**: 支持不同维度的输入张量，可以在配置中指定每个内核的输入形状
+
+3. **数据类型**: 当前仅支持 FP32 类型
+
+4. **操作约束**: 框架自动处理除零、负数开方等约束
+
+5. **ISA 支持**: 确保添加的操作在目标硬件的 ISA 中有对应实现
+
+6. **输入数量**: 每个内核支持 1-3 个输入张量，可以在配置中指定
 
 ## 参考文件
 

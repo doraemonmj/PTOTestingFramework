@@ -11,6 +11,8 @@ Orchestration 组合函数生成器
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
+from .fuzzer import is_shape_aligned
+
 
 class OrchestratorGenerator:
     """生成 Orchestration 组合函数的生成器"""
@@ -71,7 +73,7 @@ class OrchestratorGenerator:
             f"    def orchestrator(self, {', '.join(params)}) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:",
         ]
 
-        # 顺序调用内核
+        # 顺序调用内核 - 不需要显式创建 tensor
         result_var = None
         for i, kernel in enumerate(kernels):
             kernel_name = kernel["name"]
@@ -82,6 +84,7 @@ class OrchestratorGenerator:
                 # 替换第一个输入为前一个内核的输出
                 kernel_inputs[0] = result_var
 
+            # 调用 InCore 函数，框架会自动处理输出 tensor
             result_var = f"result_{i}"
             inputs_str = ", ".join(kernel_inputs)
             code_lines.append(f"        {result_var} = self.{kernel_name}({inputs_str})")
@@ -145,7 +148,7 @@ class OrchestratorGenerator:
             f"    def orchestrator(self, {', '.join(params)}) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:",
         ]
 
-        # 并行执行所有内核
+        # 并行执行所有内核 - 不需要显式创建 tensor
         result_vars = []
         for i, kernel in enumerate(kernels):
             kernel_name = kernel["name"]
@@ -231,7 +234,7 @@ class OrchestratorGenerator:
         parallel_kernels = kernels[:mid]
         sequential_kernels = kernels[mid:]
 
-        # 并行执行前半部分
+        # 并行执行前半部分 - 不需要显式创建 tensor
         branch_results = []
         for i, kernel in enumerate(parallel_kernels):
             kernel_name = kernel["name"]
@@ -290,9 +293,11 @@ class OrchestratorGenerator:
         rows, cols = shape
         code = f"""    @pl.function(type=pl.FunctionType.InCore)
     def merge_results(self, a: pl.Tensor[[{rows}, {cols}], pl.FP32],
-                      b: pl.Tensor[[{rows}, {cols}], pl.FP32]) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:
-        tile_a = pl.op.block.load(a, 0, 0, {rows}, {cols})
-        tile_b = pl.op.block.load(b, 0, 0, {rows}, {cols})
-        result = pl.op.block.add(tile_a, tile_b)
+                      b: pl.Tensor[[{rows}, {cols}], pl.FP32],
+                      output: pl.Tensor[[{rows}, {cols}], pl.FP32]) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:
+        tile_a = pl.load(a, offsets=[0, 0], shapes=[{rows}, {cols}])
+        tile_b = pl.load(b, offsets=[0, 0], shapes=[{rows}, {cols}])
+        result_tile = pl.add(tile_a, tile_b)
+        result = pl.store(result_tile, offsets=[0, 0], shapes=[{rows}, {cols}], output_tensor=output)
         return result"""
         return code
