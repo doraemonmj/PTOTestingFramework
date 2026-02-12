@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, List
 
-import numpy as np
+import torch
 import pytest
 
 from pto_test.core.test_case import DataType, PTOTestCase, TensorSpec
@@ -28,10 +28,13 @@ class TestFuzzSequentialSimple(PTOTestCase):
     内核数量: 2
     """
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.rows = 128
-        self.cols = 128
+    rows = 128
+    cols = 128
+
+    def __init__(self):
+        super().__init__()
+        self.config.atol = 0.0001
+        self.config.rtol = 0.0001
 
     def get_name(self) -> str:
         return 'fuzz_sequential_simple'
@@ -40,7 +43,6 @@ class TestFuzzSequentialSimple(PTOTestCase):
         return [
             TensorSpec('a', [128, 128], DataType.FP32, init_value=2.0),
             TensorSpec('b', [128, 128], DataType.FP32, init_value=2.5),
-            TensorSpec('c', [128, 128], DataType.FP32, init_value=3.0),
             TensorSpec('output', [128, 128], DataType.FP32, is_output=True),
         ]
 
@@ -61,12 +63,11 @@ class TestFuzzSequentialSimple(PTOTestCase):
                 return result
 
             @pl.function(type=pl.FunctionType.InCore)
-            def kernel_1(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+            def kernel_1(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], output: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
                 tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
                 tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
-                tile_c = pl.load(c, offsets=[0, 0], shapes=[128, 128])
-                tmp_0 = pl.add(tile_a, tile_c)
-                tmp_1 = pl.muls(tile_b, 0.5)
+                tmp_0 = pl.div(tile_a, tile_b)
+                tmp_1 = pl.muls(tmp_0, 0.5)
                 tmp_2 = pl.rsqrt(tmp_1)
                 tmp_3 = pl.exp(tmp_0)
                 tmp_4 = pl.add(tmp_2, tmp_3)
@@ -74,21 +75,24 @@ class TestFuzzSequentialSimple(PTOTestCase):
                 return result
 
             @pl.function(type=pl.FunctionType.Orchestration)
-            def orchestrator(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32], c: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+            def orchestrator(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[128, 128], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
                 result_0 = self.kernel_0(a, b)
-                result_1 = self.kernel_1(result_0, b, c)
+                result_1 = self.kernel_1(result_0, b)
                 return result_1
 
         return FuzzSequentialSimpleProgram
 
     def compute_expected(self, tensors, params=None):
-        """使用 NumPy 计算期望输出"""
-        def _numpy_kernel_0(a, b):
-            """NumPy 实现: kernel_0"""
+        """使用 Torch 计算期望输出"""
+        # 将 numpy 数组转换为 torch 张量（仅在输入边界）
+        torch_tensors = {name: torch.from_numpy(arr) for name, arr in tensors.items() if not name.endswith('output')}
+
+        def _torch_kernel_0(a, b):
+            """Torch 实现: kernel_0"""
             # 创建变量环境
             env = {}
-            env['tile_a'] = a.copy()
-            env['tile_b'] = b.copy()
+            env['tile_a'] = a.clone()
+            env['tile_b'] = b.clone()
 
             # 执行操作链
             env['tmp_0'] = env['tile_b'] - 1.0
@@ -97,28 +101,31 @@ class TestFuzzSequentialSimple(PTOTestCase):
             env['tmp_3'] = env['tmp_0'] + env['tmp_2']
             return env['tmp_3']
 
-        def _numpy_kernel_1(a, b, c):
-            """NumPy 实现: kernel_1"""
+        def _torch_kernel_1(a, b):
+            """Torch 实现: kernel_1"""
             # 创建变量环境
             env = {}
-            env['tile_a'] = a.copy()
-            env['tile_b'] = b.copy()
-            env['tile_c'] = c.copy()
+            env['tile_a'] = a.clone()
+            env['tile_b'] = b.clone()
 
             # 执行操作链
-            env['tmp_0'] = env['tile_a'] + env['tile_c']
-            env['tmp_1'] = env['tile_b'] * 0.5
-            env['tmp_1'] = np.abs(env['tmp_1']) + 1e-6
-            env['tmp_2'] = 1.0 / np.sqrt(env['tmp_1'])
-            env['tmp_3'] = np.exp(np.clip(env['tmp_0'], -10, 10))
+            env['tile_a'] = torch.where(torch.abs(env['tile_a']) < 0.01, torch.tensor(1.0), env['tile_a'])
+            env['tile_b'] = torch.where(torch.abs(env['tile_b']) < 0.01, torch.tensor(1.0), env['tile_b'])
+            env['tmp_0'] = env['tile_a'] / env['tile_b']
+            env['tmp_1'] = env['tmp_0'] * 0.5
+            env['tmp_1'] = torch.abs(env['tmp_1']) + 1e-6
+            env['tmp_2'] = torch.rsqrt(env['tmp_1'])
+            env['tmp_3'] = torch.exp(torch.clamp(env['tmp_0'], -10, 10))
             env['tmp_4'] = env['tmp_2'] + env['tmp_3']
             return env['tmp_4']
 
 
         # 顺序执行模式
-        result_0 = _numpy_kernel_0(tensors['a'], tensors['b'])
-        result_1 = _numpy_kernel_1(result_0, tensors['b'], tensors['c'])
-        tensors['output'][:] = result_1
+        result_0 = _torch_kernel_0(torch_tensors['a'], torch_tensors['b'])
+        result_1 = _torch_kernel_1(result_0, torch_tensors['b'])
+        # 将结果转换回 numpy 并写入输出
+        tensors['output'][:] = result_1.numpy()
+
 
 
 class TestMultiKernelFuzzing:

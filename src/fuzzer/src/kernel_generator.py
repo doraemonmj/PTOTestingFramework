@@ -139,9 +139,9 @@ class KernelGenerator:
             f"    def {kernel_name}(self, {', '.join(params)}) -> pl.Tensor[[{rows}, {cols}], pl.FP32]:",
         ]
 
-        # 加载输入张量 - 使用输出形状作为加载大小
+        # 加载输入张量 - 使用每个输入自己的实际形状
         for name, (r, c) in inputs:
-            code_lines.append(f"        tile_{name} = pl.load({name}, offsets=[0, 0], shapes=[{rows}, {cols}])")
+            code_lines.append(f"        tile_{name} = pl.load({name}, offsets=[0, 0], shapes=[{r}, {c}])")
 
         # 生成操作链
         for op_dict in op_chain:

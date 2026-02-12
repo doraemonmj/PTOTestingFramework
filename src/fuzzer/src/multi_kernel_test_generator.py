@@ -21,18 +21,66 @@ from .orchestrator_generator import OrchestratorGenerator
 class MultiKernelTestGenerator:
     """生成多内核测试用例的生成器"""
 
-    def __init__(self, seed: Optional[int] = None, enable_advanced_ops: bool = False):
+    def __init__(
+        self,
+        seed: Optional[int] = None,
+        enable_advanced_ops: bool = False,
+        tensor_init_type: str = "constant"
+    ):
         """初始化测试生成器
 
         Args:
             seed: 随机种子，用于可重现性
             enable_advanced_ops: 启用高级算子（row_expand, matmul等）
+            tensor_init_type: 张量初始化类型，可选值：
+                - "constant": 常量初始化（默认）
+                - "random": 随机初始化
+                - "range": 范围初始化（0到1之间）
+                - "normal": 正态分布初始化
         """
         self.seed = seed
         self.enable_advanced_ops = enable_advanced_ops
+        self.tensor_init_type = tensor_init_type
         self.kernel_gen = KernelGenerator(seed=seed, enable_advanced_ops=enable_advanced_ops)
         self.orch_gen = OrchestratorGenerator(seed=seed)
         self.fuzzer = OpFuzzer(seed=seed, enable_advanced_ops=enable_advanced_ops)
+
+    def _generate_tensor_init_value(self, tensor_index: int, init_type: str = None) -> str:
+        """生成张量初始化值的代码
+
+        Args:
+            tensor_index: 张量索引（用于生成不同的常量值）
+            init_type: 初始化类型，如果为None则使用self.tensor_init_type
+
+        Returns:
+            初始化值的代码字符串
+        """
+        if init_type is None:
+            init_type = self.tensor_init_type
+
+        if init_type == "constant":
+            # 常量初始化：每个张量使用不同的常量
+            init_val = 2.0 + tensor_index * 0.5
+            return f"init_value={init_val}"
+        elif init_type == "random":
+            # 随机初始化：使用lambda函数生成随机数
+            return "init_value=lambda shape: torch.randn(shape, dtype=torch.float32).numpy()"
+        elif init_type == "range":
+            # 范围初始化：0到1之间的均匀分布
+            return "init_value=lambda shape: torch.rand(shape, dtype=torch.float32).numpy()"
+        elif init_type == "normal":
+            # 正态分布初始化：均值0，标准差1
+            return "init_value=lambda shape: torch.randn(shape, dtype=torch.float32).numpy()"
+        elif init_type == "ones":
+            # 全1初始化
+            return "init_value=1.0"
+        elif init_type == "zeros":
+            # 全0初始化（不推荐用于输入，可能导致除零）
+            return "init_value=0.0"
+        else:
+            # 默认使用常量
+            init_val = 2.0 + tensor_index * 0.5
+            return f"init_value={init_val}"
 
     def _compute_output_shapes_for_sequential(
         self,
@@ -201,6 +249,9 @@ class MultiKernelTestGenerator:
         shape: Tuple[int, int] = (128, 128),
         num_ops_range: Tuple[int, int] = (3, 7),
         input_shapes_list: Optional[List[List[Tuple[int, int]]]] = None,
+        tensor_init_type: Optional[str] = None,
+        atol: float = 1e-5,
+        rtol: float = 1e-5,
     ) -> str:
         """生成完整的测试用例代码
 
@@ -211,6 +262,9 @@ class MultiKernelTestGenerator:
             shape: 张量形状
             num_ops_range: 每个内核的操作数量范围
             input_shapes_list: 每个内核的输入形状列表（可选）
+            tensor_init_type: 张量初始化类型（可选，如果不指定则使用全局配置）
+            atol: 绝对误差容忍度
+            rtol: 相对误差容忍度
 
         Returns:
             完整的测试用例代码字符串
@@ -243,51 +297,54 @@ class MultiKernelTestGenerator:
         else:
             raise ValueError(f"未知的组合模式: {orchestration_mode}")
 
-        # 生成 NumPy 参考实现
-        numpy_code = self._generate_numpy_reference(kernels, orch_info)
+        # 生成 Torch 参考实现
+        torch_code = self._generate_torch_reference(kernels, orch_info)
 
         # 生成完整的测试类
         test_code = self._generate_test_class(
             test_name=test_name,
             kernels=kernels,
             orch_info=orch_info,
-            numpy_code=numpy_code,
+            torch_code=torch_code,
             shape=shape,
+            tensor_init_type=tensor_init_type,
+            atol=atol,
+            rtol=rtol,
         )
 
         return test_code
 
-    def _generate_numpy_reference(
+    def _generate_torch_reference(
         self,
         kernels: List[Dict[str, Any]],
         orch_info: Dict[str, Any],
     ) -> str:
-        """生成 NumPy 参考实现代码
+        """生成 Torch 参考实现代码
 
         Args:
             kernels: 内核信息列表
             orch_info: Orchestration 信息
 
         Returns:
-            NumPy 参考实现代码字符串
+            Torch 参考实现代码字符串
         """
         code_lines = []
 
-        # 为每个内核生成 NumPy 函数
+        # 为每个内核生成 Torch 函数
         for kernel in kernels:
             kernel_name = kernel["name"]
             input_names = [inp[0] for inp in kernel["inputs"]]
             op_chain = kernel["op_chain"]
 
             # 嵌套函数不需要 self 参数
-            code_lines.append(f"    def _numpy_{kernel_name}({', '.join(input_names)}):")
-            code_lines.append(f"        \"\"\"NumPy 实现: {kernel_name}\"\"\"")
+            code_lines.append(f"    def _torch_{kernel_name}({', '.join(input_names)}):")
+            code_lines.append(f"        \"\"\"Torch 实现: {kernel_name}\"\"\"")
 
-            # 生成 NumPy 操作
+            # 生成 Torch 操作
             code_lines.append(f"        # 创建变量环境")
             code_lines.append(f"        env = {{}}")
             for name in input_names:
-                code_lines.append(f"        env['tile_{name}'] = {name}.copy()")
+                code_lines.append(f"        env['tile_{name}'] = {name}.clone()")
 
             code_lines.append(f"")
             code_lines.append(f"        # 执行操作链")
@@ -308,32 +365,32 @@ class MultiKernelTestGenerator:
                 if "avoid_zero" in op.constraints and op.constraints["avoid_zero"]:
                     for i, inp in enumerate(inputs):
                         if inp.startswith("tile_") or inp.startswith("tmp_"):
-                            code_lines.append(f"        env['{inp}'] = np.where(np.abs(env['{inp}']) < 0.01, 1.0, env['{inp}'])")
+                            code_lines.append(f"        env['{inp}'] = torch.where(torch.abs(env['{inp}']) < 0.01, torch.tensor(1.0), env['{inp}'])")
 
                 if "positive_only" in op.constraints and op.constraints["positive_only"]:
                     for i, inp in enumerate(inputs):
                         if inp.startswith("tile_") or inp.startswith("tmp_"):
-                            code_lines.append(f"        env['{inp}'] = np.abs(env['{inp}']) + 1e-6")
+                            code_lines.append(f"        env['{inp}'] = torch.abs(env['{inp}']) + 1e-6")
 
                 # 生成操作
                 if op.np_equivalent:
-                    np_expr = self._get_numpy_operation(op.name, input_vals)
-                    code_lines.append(f"        env['{output}'] = {np_expr}")
+                    torch_expr = self._get_torch_operation(op.name, input_vals)
+                    code_lines.append(f"        env['{output}'] = {torch_expr}")
 
             code_lines.append(f"        return env['{op_chain[-1]['output']}']")
             code_lines.append(f"")
 
         return "\n".join(code_lines)
 
-    def _get_numpy_operation(self, op_name: str, input_vals: List[str]) -> str:
-        """将 PyPTO 操作名转换为 NumPy 操作表达式
+    def _get_torch_operation(self, op_name: str, input_vals: List[str]) -> str:
+        """将 PyPTO 操作名转换为 Torch 操作表达式
 
         Args:
             op_name: PyPTO 操作名 (如 "block.add")
             input_vals: 输入值列表
 
         Returns:
-            NumPy 操作表达式字符串
+            Torch 操作表达式字符串
         """
         # 根据操作类型生成表达式
         # 二元操作
@@ -346,9 +403,9 @@ class MultiKernelTestGenerator:
         elif op_name == "block.div":
             return f"{input_vals[0]} / {input_vals[1]}"
         elif op_name == "block.maximum":
-            return f"np.maximum({input_vals[0]}, {input_vals[1]})"
+            return f"torch.maximum({input_vals[0]}, {input_vals[1]})"
         elif op_name == "block.minimum":
-            return f"np.minimum({input_vals[0]}, {input_vals[1]})"
+            return f"torch.minimum({input_vals[0]}, {input_vals[1]})"
         # 标量操作
         elif op_name == "block.adds":
             return f"{input_vals[0]} + {input_vals[1]}"
@@ -360,21 +417,21 @@ class MultiKernelTestGenerator:
             return f"{input_vals[0]} / {input_vals[1]}"
         # 一元操作
         elif op_name == "block.sqrt":
-            return f"np.sqrt({input_vals[0]})"
+            return f"torch.sqrt({input_vals[0]})"
         elif op_name == "block.rsqrt":
-            return f"1.0 / np.sqrt({input_vals[0]})"
+            return f"torch.rsqrt({input_vals[0]})"
         elif op_name == "block.exp":
-            return f"np.exp(np.clip({input_vals[0]}, -10, 10))"
+            return f"torch.exp(torch.clamp({input_vals[0]}, -10, 10))"
         elif op_name == "block.neg":
             return f"-{input_vals[0]}"
         elif op_name == "block.recip":
-            return f"1.0 / {input_vals[0]}"
+            return f"torch.reciprocal({input_vals[0]})"
         elif op_name == "block.log":
-            return f"np.log({input_vals[0]})"
+            return f"torch.log({input_vals[0]})"
         elif op_name == "block.abs":
-            return f"np.abs({input_vals[0]})"
+            return f"torch.abs({input_vals[0]})"
         elif op_name == "block.relu":
-            return f"np.maximum(0, {input_vals[0]})"
+            return f"torch.relu({input_vals[0]})"
         # Row expand 操作
         elif op_name == "block.row_expand_add":
             return f"{input_vals[0]} + {input_vals[1]}"  # Broadcasting
@@ -386,7 +443,7 @@ class MultiKernelTestGenerator:
             return f"{input_vals[0]} / {input_vals[1]}"
         # 矩阵操作
         elif op_name == "block.matmul":
-            return f"{input_vals[0]} @ {input_vals[1]}"
+            return f"torch.matmul({input_vals[0]}, {input_vals[1]})"
         else:
             return f"# 未知操作: {op_name}"
 
@@ -395,8 +452,11 @@ class MultiKernelTestGenerator:
         test_name: str,
         kernels: List[Dict[str, Any]],
         orch_info: Dict[str, Any],
-        numpy_code: str,
+        torch_code: str,
         shape: Tuple[int, int],
+        tensor_init_type: Optional[str] = None,
+        atol: float = 1e-5,
+        rtol: float = 1e-5,
     ) -> str:
         """生成完整的测试类代码
 
@@ -404,8 +464,11 @@ class MultiKernelTestGenerator:
             test_name: 测试名称
             kernels: 内核信息列表
             orch_info: Orchestration 信息
-            numpy_code: NumPy 参考实现代码
+            torch_code: Torch 参考实现代码
             shape: 张量形状
+            tensor_init_type: 张量初始化类型（可选，如果不指定则使用全局配置）
+            atol: 绝对误差容忍度
+            rtol: 相对误差容忍度
 
         Returns:
             完整的测试类代码
@@ -440,10 +503,13 @@ class MultiKernelTestGenerator:
             f"    内核数量: {len(kernels)}",
             f"    \"\"\"",
             f"",
-            f"    def __init__(self, **kwargs):",
-            f"        super().__init__(**kwargs)",
-            f"        self.rows = {rows}",
-            f"        self.cols = {cols}",
+            f"    rows = {rows}",
+            f"    cols = {cols}",
+            f"",
+            f"    def __init__(self):",
+            f"        super().__init__()",
+            f"        self.config.atol = {atol}",
+            f"        self.config.rtol = {rtol}",
             f"",
             f"    def get_name(self) -> str:",
             f"        return '{test_name}'",
@@ -452,11 +518,11 @@ class MultiKernelTestGenerator:
             f"        return [",
         ]
 
-        # 定义输入张量 - 使用实际形状
-        for inp_name in input_list:
-            init_val = 2.0 + input_list.index(inp_name) * 0.5
+        # 定义输入张量 - 使用实际形状和配置的初始化类型
+        for idx, inp_name in enumerate(input_list):
             inp_shape = input_shapes_map[inp_name]
-            code_lines.append(f"            TensorSpec('{inp_name}', [{inp_shape[0]}, {inp_shape[1]}], DataType.FP32, init_value={init_val}),")
+            init_code = self._generate_tensor_init_value(idx, tensor_init_type)
+            code_lines.append(f"            TensorSpec('{inp_name}', [{inp_shape[0]}, {inp_shape[1]}], DataType.FP32, {init_code}),")
 
         # 定义输出张量 - 使用实际输出形状
         code_lines.append(f"            TensorSpec('output', [{output_shape[0]}, {output_shape[1]}], DataType.FP32, is_output=True),")
@@ -497,12 +563,15 @@ class MultiKernelTestGenerator:
         code_lines.append(f"        return {test_name.replace('_', ' ').title().replace(' ', '')}Program")
         code_lines.append(f"")
 
-        # 添加 NumPy 参考实现
+        # 添加 Torch 参考实现
         code_lines.append(f"    def compute_expected(self, tensors, params=None):")
-        code_lines.append(f"        \"\"\"使用 NumPy 计算期望输出\"\"\"")
-        # numpy_code 包含嵌套函数定义，需要添加到 compute_expected 内部，所以需要额外缩进
-        numpy_lines = numpy_code.split('\n')
-        for line in numpy_lines:
+        code_lines.append(f"        \"\"\"使用 Torch 计算期望输出\"\"\"")
+        code_lines.append(f"        # 将 numpy 数组转换为 torch 张量（仅在输入边界）")
+        code_lines.append(f"        torch_tensors = {{name: torch.from_numpy(arr) for name, arr in tensors.items() if not name.endswith('output')}}")
+        code_lines.append(f"")
+        # torch_code 包含嵌套函数定义，需要添加到 compute_expected 内部，所以需要额外缩进
+        torch_lines = torch_code.split('\n')
+        for line in torch_lines:
             if line.strip():  # 跳过空行
                 code_lines.append(f"    {line}")  # 添加额外的4个空格缩进
             else:
@@ -520,20 +589,21 @@ class MultiKernelTestGenerator:
                 if i > 0 and result_var:
                     # 第一个输入使用前一个结果（变量名）
                     kernel_inputs[0] = result_var
-                    # 构建参数列表：第一个是变量，其他从 tensors 获取
+                    # 构建参数列表：第一个是变量，其他从 torch_tensors 获取
                     inputs_parts = [kernel_inputs[0]]
                     for inp in kernel_inputs[1:]:
-                        inputs_parts.append(f"tensors['{inp}']")
+                        inputs_parts.append(f"torch_tensors['{inp}']")
                     inputs_str = ", ".join(inputs_parts)
                 else:
-                    # 第一个内核，所有输入都从 tensors 获取
-                    inputs_str = ", ".join([f"tensors['{inp}']" for inp in kernel_inputs])
+                    # 第一个内核，所有输入都从 torch_tensors 获取
+                    inputs_str = ", ".join([f"torch_tensors['{inp}']" for inp in kernel_inputs])
 
                 result_var = f"result_{i}"
                 # 调用嵌套函数不需要 self
-                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
+                code_lines.append(f"        {result_var} = _torch_{kernel_name}({inputs_str})")
 
-            code_lines.append(f"        tensors['output'][:] = {result_var}")
+            code_lines.append(f"        # 将结果转换回 numpy 并写入输出")
+            code_lines.append(f"        tensors['output'][:] = {result_var}.numpy()")
 
         elif orch_info["mode"] == "branching":
             code_lines.append(f"        # 分支执行模式")
@@ -544,20 +614,22 @@ class MultiKernelTestGenerator:
                 result_var = f"branch_{i}"
                 branch_results.append(result_var)
 
-                inputs_str = ", ".join([f"tensors['{inp}']" for inp in kernel_inputs])
+                inputs_str = ", ".join([f"torch_tensors['{inp}']" for inp in kernel_inputs])
                 # 调用嵌套函数不需要 self
-                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
+                code_lines.append(f"        {result_var} = _torch_{kernel_name}({inputs_str})")
 
             # 合并结果
             if len(branch_results) == 1:
-                code_lines.append(f"        tensors['output'][:] = {branch_results[0]}")
+                code_lines.append(f"        # 将结果转换回 numpy 并写入输出")
+                code_lines.append(f"        tensors['output'][:] = {branch_results[0]}.numpy()")
             else:
                 merged = branch_results[0]
                 for i in range(1, len(branch_results)):
                     new_merged = f"merged_{i}"
                     code_lines.append(f"        {new_merged} = {merged} + {branch_results[i]}")
                     merged = new_merged
-                code_lines.append(f"        tensors['output'][:] = {merged}")
+                code_lines.append(f"        # 将结果转换回 numpy 并写入输出")
+                code_lines.append(f"        tensors['output'][:] = {merged}.numpy()")
 
         elif orch_info["mode"] == "mixed":
             code_lines.append(f"        # 混合执行模式")
@@ -573,9 +645,9 @@ class MultiKernelTestGenerator:
                 result_var = f"parallel_{i}"
                 branch_results.append(result_var)
 
-                inputs_str = ", ".join([f"tensors['{inp}']" for inp in kernel_inputs])
+                inputs_str = ", ".join([f"torch_tensors['{inp}']" for inp in kernel_inputs])
                 # 调用嵌套函数不需要 self
-                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
+                code_lines.append(f"        {result_var} = _torch_{kernel_name}({inputs_str})")
 
             # 合并并行结果
             if len(branch_results) > 1:
@@ -598,13 +670,14 @@ class MultiKernelTestGenerator:
                 # 第一个输入是变量，其他是张量
                 inputs_parts = [kernel_inputs[0]]
                 for inp in kernel_inputs[1:]:
-                    inputs_parts.append(f"tensors['{inp}']")
+                    inputs_parts.append(f"torch_tensors['{inp}']")
                 inputs_str = ", ".join(inputs_parts)
                 # 调用嵌套函数不需要 self
-                code_lines.append(f"        {result_var} = _numpy_{kernel_name}({inputs_str})")
+                code_lines.append(f"        {result_var} = _torch_{kernel_name}({inputs_str})")
                 current_result = result_var
 
-            code_lines.append(f"        tensors['output'][:] = {current_result}")
+            code_lines.append(f"        # 将结果转换回 numpy 并写入输出")
+            code_lines.append(f"        tensors['output'][:] = {current_result}.numpy()")
 
         code_lines.append(f"")
 
@@ -625,6 +698,7 @@ class MultiKernelTestGenerator:
                 - mode: 组合模式
                 - shape: 张量形状
                 - num_ops_range: 操作数量范围
+                - tensor_init_type: 张量初始化类型（可选）
         """
         # 生成文件头
         header = '''"""
@@ -638,7 +712,7 @@ import sys
 from pathlib import Path
 from typing import Any, List
 
-import numpy as np
+import torch
 import pytest
 
 from pto_test.core.test_case import DataType, PTOTestCase, TensorSpec
@@ -662,6 +736,7 @@ if _PYPTO_ROOT.exists() and str(_PYPTO_ROOT) not in sys.path:
                 shape=config.get("shape", (128, 128)),
                 num_ops_range=config.get("num_ops_range", (3, 7)),
                 input_shapes_list=config.get("input_shapes_list"),
+                tensor_init_type=config.get("tensor_init_type"),
             )
             test_cases.append(test_code)
 

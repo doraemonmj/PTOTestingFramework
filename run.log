@@ -1,0 +1,122 @@
+============================= test session starts ==============================
+platform linux -- Python 3.10.19, pytest-9.0.2, pluggy-1.6.0 -- /data/m00956180/.conda/envs/mjzkd/bin/python3.10
+cachedir: .pytest_cache
+rootdir: /data/m00956180/runtime/ptofuzz
+configfile: pyproject.toml
+plugins: forked-1.6.0, repeat-0.9.4
+collecting ... collected 1 item
+
+src/fuzzer/generated_tests/test_fuzz_multi_kernel.py::TestMultiKernelFuzzing::test_fuzz_sequential_simple 2026-02-12 15:53:42.801 D | Created 1 basic blocks
+2026-02-12 15:53:42.801 I | Identified 1 basic blocks
+2026-02-12 15:53:42.801 D | Found 6 dependencies in block 0
+2026-02-12 15:53:42.801 I | Found 6 dependency edges
+2026-02-12 15:53:42.801 I | Dependency types: RAW=6, WAR=0, WAW=0
+2026-02-12 15:53:42.801 D | Assigned declaration order to 8 statements
+2026-02-12 15:53:42.801 D | Variable tile_a has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 3
+2026-02-12 15:53:42.801 D | Lifetime for tile_a: [0, 3] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tile_b has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 2
+2026-02-12 15:53:42.801 D | Lifetime for tile_b: [1, 2] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_0 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 5
+2026-02-12 15:53:42.801 D | Lifetime for tmp_0: [2, 5] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_1 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 4
+2026-02-12 15:53:42.801 D | Lifetime for tmp_1: [3, 4] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_2 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 5
+2026-02-12 15:53:42.801 D | Lifetime for tmp_2: [4, 5] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_3 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 6
+2026-02-12 15:53:42.801 D | Lifetime for tmp_3: [5, 6] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_1 can reuse tile_b (lifetime [3, 4] vs [1, 2])
+2026-02-12 15:53:42.801 D | Variable tmp_2 can reuse tile_a (lifetime [4, 5] vs [0, 3])
+2026-02-12 15:53:42.801 D | Variable tmp_3 cannot reuse tile_a due to overlap with existing user tmp_2 (lifetime [5, 6] vs [4, 5])
+2026-02-12 15:53:42.801 D | Variable tmp_3 can reuse tile_b (lifetime [5, 6] vs [1, 2])
+2026-02-12 15:53:42.801 D | Created 1 basic blocks
+2026-02-12 15:53:42.801 I | Identified 1 basic blocks
+2026-02-12 15:53:42.801 D | Found 8 dependencies in block 0
+2026-02-12 15:53:42.801 I | Found 8 dependency edges
+2026-02-12 15:53:42.801 I | Dependency types: RAW=8, WAR=0, WAW=0
+2026-02-12 15:53:42.801 D | Assigned declaration order to 9 statements
+2026-02-12 15:53:42.801 D | Variable tile_a has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 2
+2026-02-12 15:53:42.801 D | Lifetime for tile_a: [0, 2] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tile_b has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 2
+2026-02-12 15:53:42.801 D | Lifetime for tile_b: [1, 2] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_0 has 2 use statements
+2026-02-12 15:53:42.801 D |   Use at order 3
+2026-02-12 15:53:42.801 D |   Use at order 5
+2026-02-12 15:53:42.801 D | Lifetime for tmp_0: [2, 5] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_1 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 4
+2026-02-12 15:53:42.801 D | Lifetime for tmp_1: [3, 4] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_2 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 6
+2026-02-12 15:53:42.801 D | Lifetime for tmp_2: [4, 6] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_3 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 6
+2026-02-12 15:53:42.801 D | Lifetime for tmp_3: [5, 6] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_4 has 1 use statements
+2026-02-12 15:53:42.801 D |   Use at order 7
+2026-02-12 15:53:42.801 D | Lifetime for tmp_4: [6, 7] space=1 size=65536
+2026-02-12 15:53:42.801 D | Variable tmp_1 can reuse tile_a (lifetime [3, 4] vs [0, 2])
+2026-02-12 15:53:42.801 D | Variable tmp_2 cannot reuse tile_a due to overlap with existing user tmp_1 (lifetime [4, 6] vs [3, 4])
+2026-02-12 15:53:42.801 D | Variable tmp_2 can reuse tile_b (lifetime [4, 6] vs [1, 2])
+2026-02-12 15:53:42.801 D | Variable tmp_3 can reuse tile_a (lifetime [5, 6] vs [0, 2])
+2026-02-12 15:53:42.801 D | Variable tmp_4 cannot reuse tile_a due to overlap with existing user tmp_3 (lifetime [6, 7] vs [5, 6])
+2026-02-12 15:53:42.802 D | Variable tmp_4 cannot reuse tile_b due to overlap with existing user tmp_2 (lifetime [6, 7] vs [4, 6])
+2026-02-12 15:53:42.802 D | Variable tmp_4 can reuse tmp_0 (lifetime [6, 7] vs [2, 5])
+2026-02-12 15:53:42.802 D | Created 1 basic blocks
+2026-02-12 15:53:42.802 I | Identified 1 basic blocks
+2026-02-12 15:53:42.802 D | Found 1 dependencies in block 0
+2026-02-12 15:53:42.802 I | Found 1 dependency edges
+2026-02-12 15:53:42.802 I | Dependency types: RAW=1, WAR=0, WAW=0
+2026-02-12 15:53:42.802 D | Assigned declaration order to 3 statements
+2026-02-12 15:53:42.802 W | No TileType variables found, skipping memory reuse
+2026-02-12 15:53:42.803 D | Created 1 basic blocks
+2026-02-12 15:53:42.803 D | Found 1 dependencies in block 0
+[INFO] ensure_device_set: DeviceRunner: device=9 set, streams created
+[INFO] init_runtime_impl: Registering 2 kernel(s) in init_runtime_impl
+[INFO] init_runtime_impl: Loaded orchestration function: BuildOrchestrator
+[INFO] init_runtime_impl: === Calling Orchestration Function ===
+[INFO] init_runtime_impl: Runtime initialized. Ready for execution from Python.
+[INFO] ensure_binaries_loaded: DeviceRunner: binaries loaded
+
+=== Initialize runtime args ===
+
+=== launch_aicpu_kernel DynTileFwkKernelServerInit===
+
+=== launch_aicpu_kernel DynTileFwkKernelServer===
+
+=== launch_aicore_kernel===
+
+=== rtStreamSynchronize stream_aicpu_===
+
+=== rtStreamSynchronize stream_aicore_===
+[INFO] validate_runtime_impl: === Copying Results Back to Host ===
+[INFO] validate_runtime_impl: === Cleaning Up ===
+[INFO] validate_runtime_impl: Freed 1 device tensors
+[INFO] validate_runtime_impl: === Finalize Complete ===
+PASSED
+
+=============================== warnings summary ===============================
+../../.conda/envs/mjzkd/lib/python3.10/site-packages/torch_npu/utils/collect_env.py:58
+../../.conda/envs/mjzkd/lib/python3.10/site-packages/torch_npu/utils/collect_env.py:58
+  /data/m00956180/.conda/envs/mjzkd/lib/python3.10/site-packages/torch_npu/utils/collect_env.py:58: UserWarning: Warning: The /usr/local/Ascend/cann-8.5.0 owner does not match the current owner.
+    warnings.warn(f"Warning: The {path} owner does not match the current owner.")
+
+../../.conda/envs/mjzkd/lib/python3.10/site-packages/torch_npu/utils/collect_env.py:58
+../../.conda/envs/mjzkd/lib/python3.10/site-packages/torch_npu/utils/collect_env.py:58
+  /data/m00956180/.conda/envs/mjzkd/lib/python3.10/site-packages/torch_npu/utils/collect_env.py:58: UserWarning: Warning: The /usr/local/Ascend/cann-8.5.0/aarch64-linux/ascend_toolkit_install.info owner does not match the current owner.
+    warnings.warn(f"Warning: The {path} owner does not match the current owner.")
+
+src/fuzzer/generated_tests/test_fuzz_multi_kernel.py:24
+  /data/m00956180/runtime/ptofuzz/src/fuzzer/generated_tests/test_fuzz_multi_kernel.py:24: PytestCollectionWarning: cannot collect test class 'TestFuzzSequentialSimple' because it has a __init__ constructor (from: src/fuzzer/generated_tests/test_fuzz_multi_kernel.py)
+    class TestFuzzSequentialSimple(PTOTestCase):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 1 passed, 5 warnings in 12.83s ========================
+[INFO] finalize: DeviceRunner finalized

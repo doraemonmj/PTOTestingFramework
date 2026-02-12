@@ -1,18 +1,36 @@
-# 多内核模糊测试框架
+# 多内核模糊测试框架 (Multi-Kernel Fuzzing Framework)
 
 这是一个用于生成和测试多内核 PyPTO 程序的自动化框架。该框架可以随机生成多个 InCore 内核函数，并通过 Orchestration 函数以不同的模式组合它们。
 
 **注意**：`src/fuzzer` 是一个独立的框架，不依赖 `src/pto_test/fuzzing`。所有必要的代码都包含在此目录中。
 
+---
+
+## 目录
+
+1. [快速开始](#快速开始)
+2. [代码结构](#代码结构)
+3. [核心概念](#核心概念)
+4. [配置指南](#配置指南)
+5. [算子规则](#算子规则)
+6. [使用示例](#使用示例)
+7. [更新日志](#更新日志)
+
+---
+
 ## 快速开始
 
-### 基础示例 (基本算子)
-```bash
-# 生成1个测试用例 (使用基础算子: add, mul, div, sqrt, exp等)
-python src/fuzzer/example_multi_kernel.py --num-cases 1
+### 基础示例
 
-# 生成5个测试用例
-python src/fuzzer/example_multi_kernel.py --num-cases 5
+```bash
+# 生成测试用例（使用默认配置）
+python src/fuzzer/example_multi_kernel.py
+
+# 生成特定配置的测试用例
+python src/fuzzer/example_multi_kernel.py --config-index 0
+
+# 设置误差容忍度
+python src/fuzzer/example_multi_kernel.py --atol 1e-3 --rtol 1e-3
 
 # 运行测试（只生成代码）
 pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only
@@ -21,32 +39,28 @@ pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only
 pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only --save-kernels --kernels-dir=/tmp/kernels
 ```
 
-**说明**: 基础示例默认使用以下算子:
-- 二元: add, sub, mul, div, maximum, minimum
-- 标量: adds, subs, muls, divs
-- 一元: sqrt, rsqrt, exp, neg, recip, log, abs, relu
+### 命令行参数
 
-### 高级示例 (row_expand, matmul 等高级算子)
 ```bash
-# 生成使用高级算子的测试用例
-python src/fuzzer/example_multi_kernel.py --num-cases 3 --enable-advanced-ops
+python src/fuzzer/example_multi_kernel.py [选项]
 
-# 运行高级算子测试
-pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only
+选项:
+  --config-index N  指定配置索引（从0开始），不指定则使用所有配置
+  --output PATH     输出文件路径（默认: src/fuzzer/generated_tests/test_fuzz_multi_kernel.py）
+  --atol FLOAT      绝对误差容忍度（默认: 1e-4）
+  --rtol FLOAT      相对误差容忍度（默认: 1e-4）
 ```
 
-**高级算子包括**:
-- Row expand: row_expand_add, row_expand_sub, row_expand_mul, row_expand_div
-- Matrix: matmul
+---
 
-**注意**: 使用 row_expand 算子时，请确保输入形状正确配置（第二个输入应为 [M, 1] 形状）。
+## 代码结构
 
-## 目录结构
+### 目录结构
 
 ```
 src/fuzzer/                          # 独立的模糊测试框架
 ├── __init__.py                      # 外部接口
-├── example_multi_kernel.py          # 使用示例脚本
+├── example_multi_kernel.py          # 使用示例脚本（主入口）
 ├── conftest.py                      # pytest 配置
 ├── README.md                        # 本文档
 ├── src/                             # 内部实现
@@ -59,161 +73,329 @@ src/fuzzer/                          # 独立的模糊测试框架
     └── test_fuzz_multi_kernel.py    # 生成的测试文件
 ```
 
-## Op 组合规则
+### 核心模块说明
 
-**详细规则文档**: 请参考 [OP_RULES.md](OP_RULES.md) 获取完整的算子规则和组合模式。
+#### 1. fuzzer.py - OpFuzzer
+操作符模糊生成器，负责：
+- 定义所有支持的算子（二元、一元、标量、高级算子）
+- 随机生成操作链
+- 处理数据约束（避免除零、正值约束等）
+- 生成 NumPy/PyTorch 参考实现
 
-### 1. 操作符定义
+**主要类**：
+- `OpSpec`: 算子规格定义
+- `OpFuzzer`: 操作链生成器
 
-操作符在 [src/fuzzer.py](src/fuzzer.py) 的 `OpFuzzer.__init__` 方法中定义。
+#### 2. kernel_generator.py - KernelGenerator
+内核生成器，负责：
+- 生成单个 InCore 内核函数
+- 支持不同数量和维度的输入
+- 生成 PyPTO 代码和 PyTorch 参考实现
+- 处理形状对齐约束
 
-**当前支持的操作**：
-- **二元操作**: `block.add`, `block.sub`, `block.mul`, `block.div`, `block.maximum`, `block.minimum`
-- **标量操作**: `block.adds`, `block.subs`, `block.muls`, `block.divs`
-- **一元操作**: `block.sqrt`, `block.rsqrt`, `block.exp`, `block.neg`, `block.recip`, `block.log`, `block.abs`, `block.relu`
-- **行广播操作** (高级): `block.row_expand_add`, `block.row_expand_sub`, `block.row_expand_mul`, `block.row_expand_div`
-- **矩阵操作** (高级): `block.matmul`
+#### 3. orchestrator_generator.py - OrchestratorGenerator
+编排函数生成器，负责：
+- 生成 Orchestration 函数
+- 支持三种组合模式：sequential、branching、mixed
+- 管理内核间的数据流
 
-**启用高级操作**：
-```python
-# 在生成器中启用高级操作
-from src.fuzzer.src.fuzzer import OpFuzzer
+#### 4. multi_kernel_test_generator.py - MultiKernelTestGenerator
+测试用例生成器，负责：
+- 生成完整的 PTOTestCase 类
+- 集成内核和编排函数
+- 生成 PyTorch 参考实现
+- 生成测试文件
 
-# 启用行广播和矩阵操作
-fuzzer = OpFuzzer(seed=42, enable_advanced_ops=True)
-```
+---
 
-**添加新操作**：
-```python
-# 在 fuzzer.py 中定义新操作
-CUSTOM_OPS = [
-    OpSpec("block.custom_op", ["tile", "tile"], "tile", {}, lambda a, b: custom_numpy_impl(a, b)),
-]
+## 核心概念
 
-# 在 __init__ 中添加
-self.ops = self.ops + CUSTOM_OPS
-```
-
-**操作符约束**：
-- `avoid_zero`: 用于除法操作,确保分母不为零
-- `positive_only`: 用于 sqrt, log 等操作,确保输入为正数
-- `row_vec_shape`: 用于 row_expand 操作,要求第二个输入形状为 [M,1]
-
-更多详情请查看 [OP_RULES.md](OP_RULES.md) 中的完整算子列表和约束说明。
-
-### 2. 内核生成规则
+### 1. 内核生成规则
 
 每个 InCore 内核包含：
-- **输入**: 1-3 个 tile 张量，**支持不同维度**
-- **操作链**: 1-10 个随机操作
+- **输入**: 1-3 个 tile 张量，支持不同维度
+- **操作链**: 3-10 个随机操作
 - **输出**: 1 个 tile 张量
-
-**输入张量配置**：
-- 可以指定每个内核的输入数量和维度
-- 不同内核可以有不同数量的输入（1-3个）
-- 每个输入可以有不同的形状（如 128x128, 64x64, 256x256）
-- 如果不指定，框架会随机生成输入配置
-
-**示例配置**：
-```python
-# 在 example_multi_kernel.py 中配置
-{
-    "name": "test_case_name",
-    "num_kernels": 3,
-    "input_shapes_list": [
-        [(128, 128), (64, 64)],           # kernel_0: 2个不同维度的输入
-        [(128, 128), (128, 128), (256, 256)],  # kernel_1: 3个不同维度的输入
-        [(256, 256)],                     # kernel_2: 1个输入
-    ],
-}
-```
 
 **操作链生成规则**：
 1. 从输入张量中随机选择操作数
-2. 随机选择一个操作符（add/sub/mul/div）
+2. 随机选择一个操作符（根据权重）
 3. 执行操作并生成中间结果
 4. 中间结果可以被后续操作使用
 5. 最后一个操作的结果作为内核输出
 
 **示例**：
 ```python
-# 生成的内核代码 - 不同维度的输入
 @pl.function(type=pl.FunctionType.InCore)
-def kernel_0(self, a: pl.Tensor[[128, 128], pl.FP32], b: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
+def kernel_0(self, a: pl.Tensor[[128, 128], pl.FP32],
+                   b: pl.Tensor[[64, 64], pl.FP32]) -> pl.Tensor[[128, 128], pl.FP32]:
     tile_a = pl.load(a, offsets=[0, 0], shapes=[128, 128])
-    tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])  # 加载到输出大小
-    tmp_0 = pl.add(tile_b, tile_a)      # 操作1: b + a
-    tmp_1 = pl.mul(tmp_0, tile_a)       # 操作2: tmp_0 * a
-    tmp_2 = pl.sub(tmp_1, tile_b)       # 操作3: tmp_1 - b
+    tile_b = pl.load(b, offsets=[0, 0], shapes=[128, 128])
+    tmp_0 = pl.add(tile_b, tile_a)      # 操作1
+    tmp_1 = pl.mul(tmp_0, tile_a)       # 操作2
+    tmp_2 = pl.sub(tmp_1, tile_b)       # 操作3
     return tmp_2
 ```
 
-### 3. 内核组合模式
+### 2. 内核组合模式
 
-**Sequential (顺序模式)**：
-- 内核按顺序执行
-- 每个内核的输出作为下一个内核的输入
+#### Sequential (顺序模式)
+内核按顺序执行，每个内核的输出作为下一个内核的输入。
+
 ```
 input → kernel_0 → kernel_1 → kernel_2 → output
 ```
 
-**Branching (分支模式)**：
-- 多个内核并行执行
-- 使用 merge 内核合并结果
+#### Branching (分支模式)
+多个内核并行执行，使用 merge 内核合并结果。
+
 ```
 input → kernel_0 ↘
 input → kernel_1 → merge → output
 input → kernel_2 ↗
 ```
 
-**Mixed (混合模式)**：
-- 结合顺序和分支执行
+#### Mixed (混合模式)
+结合顺序和分支执行。
+
 ```
 input → kernel_0 ↘
 input → kernel_1 → merge → kernel_2 → kernel_3 → output
 ```
 
-### 4. 带参数的操作符
+### 3. 支持的算子
 
-框架支持带参数的操作符（如 transpose, reduce, reshape）：
+#### 基本算子（默认启用）
+- **二元操作**: add, sub, mul, div, maximum, minimum
+- **标量操作**: adds, subs, muls, divs
+- **一元操作**: sqrt, rsqrt, exp, neg, recip, log, abs, relu
+
+#### 高级算子（需要启用）
+- **行广播操作**: row_expand_add, row_expand_sub, row_expand_mul, row_expand_div
+- **矩阵操作**: matmul
+
+详细算子规则请参考 [算子规则](#算子规则) 章节。
+
+---
+
+## 配置指南
+
+### 配置结构
+
+所有配置都在 `example_multi_kernel.py` 的 `all_configs` 列表中定义：
 
 ```python
-# 在 fuzzer.py 中添加
-OpSpec(
-    "block.transpose",
-    ["tile"], "tile", {},
-    lambda a, dims: np.transpose(a, dims),
-    shape_transform=lambda shapes, params: tuple(shapes[0][i] for i in params['dims']),
-    param_generator=lambda shapes, rng: {'dims': (1, 0)},
-    requires_params=True
-)
+all_configs = [
+    {
+        # 基本信息
+        "name": "test_name",              # 测试用例名称（必需）
+        "description": "测试描述",         # 测试描述（可选）
+
+        # 生成控制
+        "num_instances": 1,               # 从该配置生成的测试实例数量
+        "seed": 42,                       # 随机种子
+
+        # 算子配置
+        "enable_advanced_ops": False,     # 是否启用高级算子
+
+        # 张量配置
+        "tensor_init_type": "constant",   # 张量初始化类型
+        "shape": (128, 128),              # 张量形状
+
+        # 内核配置
+        "num_kernels": 3,                 # 内核数量
+        "mode": "sequential",             # 组合模式
+        "num_ops_range": (3, 7),          # 每个内核的操作数量范围
+        "input_shapes_list": None,        # 每个内核的输入形状列表（可选）
+    },
+]
 ```
 
-**OpSpec 参数说明**：
-- `name`: 操作名称（PyPTO API）
-- `input_types`: 输入类型列表
-- `output_type`: 输出类型
-- `constraints`: 约束条件（如 `avoid_zero`, `positive_only`）
-- `np_equivalent`: NumPy 参考实现
-- `shape_transform`: shape 变换函数（可选）
-- `param_generator`: 参数生成函数（可选）
-- `requires_params`: 是否需要参数
+### 配置字段详解
 
-### 5. 常见算子组合模式
+#### 1. 基本信息
+- **name** (必需): 测试用例的名称
+- **description** (可选): 测试用例的描述
 
-参考 [OP_RULES.md](OP_RULES.md) 第 2.2 节获取完整的算子组合模式，包括：
+#### 2. 生成控制
+- **num_instances** (默认: 1): 从该配置生成的测试实例数量
+  - 如果设置为 N > 1，将生成 N 个测试用例
+  - 每个实例使用不同的随机种子：`seed + instance_index`
+  - 实例名称自动添加索引：`name_0`, `name_1`, ..., `name_N-1`
 
-#### Softmax 模式
+- **seed** (默认: 42): 随机种子，用于可重现性
+
+#### 3. 算子配置
+- **enable_advanced_ops** (默认: False): 是否启用高级算子
+  - False: 只使用基本算子
+  - True: 包含高级算子（row_expand, matmul 等）
+
+#### 4. 张量配置
+- **tensor_init_type** (默认: "constant"): 张量初始化类型
+  - `"constant"`: 每个张量使用不同的常量值（2.0, 2.5, 3.0, ...）
+  - `"random"`: 使用 `torch.randn` 生成随机正态分布值
+  - `"range"`: 使用 `torch.rand` 生成 [0, 1) 范围内的随机值
+  - `"normal"`: 使用 `torch.randn` 生成标准正态分布值
+  - `"ones"`: 所有元素初始化为 1.0
+  - `"zeros"`: 所有元素初始化为 0.0
+
+- **shape** (默认: (128, 128)): 张量的形状
+
+#### 5. 内核配置
+- **num_kernels** (默认: 3): 生成的内核数量
+
+- **mode** (默认: "sequential"): 内核组合模式
+  - `"sequential"`: 顺序执行
+  - `"branching"`: 分支执行
+  - `"mixed"`: 混合模式
+
+- **num_ops_range** (默认: (3, 7)): 每个内核包含的操作数量范围
+
+- **input_shapes_list** (可选): 每个内核的输入形状列表
+  - 如果为 None，则自动生成
+  - 示例：`[[(128, 128), (128, 128)], [(128, 128)]]`
+
+### 配置示例
+
+#### 示例 1: 简单顺序执行
 ```python
-# 1. Row max reduction
-max_vals = pl.row_max(tile, tmp_tile)
-# 2. Subtract max for numerical stability
+{
+    "name": "simple_sequential",
+    "num_instances": 1,
+    "seed": 42,
+    "enable_advanced_ops": False,
+    "num_kernels": 2,
+    "mode": "sequential",
+    "shape": (128, 128),
+    "num_ops_range": (3, 5),
+    "tensor_init_type": "constant",
+    "input_shapes_list": [
+        [(128, 128), (128, 128)],  # kernel_0: 2个输入
+    ],
+    "description": "简单顺序执行：2个内核"
+}
+```
+
+#### 示例 2: 生成多个随机测试实例
+```python
+{
+    "name": "random_tests",
+    "num_instances": 5,  # 生成5个测试用例
+    "seed": 100,         # 将使用种子 100, 101, 102, 103, 104
+    "enable_advanced_ops": False,
+    "num_kernels": 3,
+    "mode": "branching",
+    "shape": (128, 128),
+    "num_ops_range": (4, 8),
+    "tensor_init_type": "random",
+    "input_shapes_list": None,
+    "description": "随机分支测试：生成5个不同的测试实例"
+}
+```
+
+---
+
+## 算子规则
+
+### 形状对齐约束
+
+**重要**: 所有 tensor 创建和 reshape 操作必须满足 32 字节对齐约束。
+
+**规则**:
+- 形状的尾轴（最后一个维度，即列数）必须满足：
+  1. 尾轴 = 1, 或者
+  2. (尾轴 × sizeof(datatype)) % 32 == 0
+
+**FP32 类型的有效尾轴值**:
+- 尾轴 = 1（总是有效）
+- 尾轴 % 8 == 0（因为 8 × 4 = 32）
+- 有效值: 1, 8, 16, 24, 32, 40, 48, 56, 64, ..., 128, ...
+
+**示例**:
+```python
+# ✓ 有效的形状
+pl.tensor.create([128, 1], pl.FP32)      # 尾轴=1
+pl.tensor.create([128, 8], pl.FP32)      # 8*4=32, 对齐
+pl.tensor.create([128, 128], pl.FP32)    # 128*4=512, 对齐
+
+# ✗ 无效的形状
+pl.tensor.create([128, 3], pl.FP32)      # 3*4=12, 不对齐
+pl.tensor.create([128, 5], pl.FP32)      # 5*4=20, 不对齐
+```
+
+### 算子分类
+
+#### 1. Block Element-wise Binary Operations
+| 算子名 | 输入类型 | 输出类型 | 约束 | NumPy等价 |
+|--------|----------|----------|------|-----------|
+| `block.add` | `tile, tile` | `tile` | 支持广播 | `a + b` |
+| `block.sub` | `tile, tile` | `tile` | 支持广播 | `a - b` |
+| `block.mul` | `tile, tile` | `tile` | 支持广播 | `a * b` |
+| `block.div` | `tile, tile` | `tile` | 避免除零 | `a / b` |
+| `block.maximum` | `tile, tile` | `tile` | 支持广播 | `np.maximum(a, b)` |
+| `block.minimum` | `tile, tile` | `tile` | 支持广播 | `np.minimum(a, b)` |
+
+#### 2. Block Scalar Operations
+| 算子名 | 输入类型 | 输出类型 | NumPy等价 |
+|--------|----------|----------|-----------|
+| `block.adds` | `tile, scalar` | `tile` | `a + s` |
+| `block.subs` | `tile, scalar` | `tile` | `a - s` |
+| `block.muls` | `tile, scalar` | `tile` | `a * s` |
+| `block.divs` | `tile, scalar` | `tile` | `a / s` |
+
+#### 3. Block Unary Operations
+| 算子名 | 输入类型 | 输出类型 | 约束 | NumPy等价 |
+|--------|----------|----------|------|-----------|
+| `block.neg` | `tile` | `tile` | - | `-a` |
+| `block.exp` | `tile` | `tile` | 建议范围 [-10, 10] | `np.exp(a)` |
+| `block.recip` | `tile` | `tile` | 避免除零 | `1.0 / a` |
+| `block.sqrt` | `tile` | `tile` | 输入 ≥ 0 | `np.sqrt(a)` |
+| `block.rsqrt` | `tile` | `tile` | 输入 > 0 | `1.0 / np.sqrt(a)` |
+| `block.log` | `tile` | `tile` | 输入 > 0 | `np.log(a)` |
+| `block.abs` | `tile` | `tile` | - | `np.abs(a)` |
+| `block.relu` | `tile` | `tile` | - | `np.maximum(0, a)` |
+
+#### 4. Block Row/Column Broadcast Operations (高级)
+| 算子名 | 输入类型 | 输出类型 | 形状约束 | NumPy等价 |
+|--------|----------|----------|----------|-----------|
+| `block.row_expand_add` | `tile[M,N], tile[M,1]` | `tile[M,N]` | 第二个输入 [M,1] | `tile + row_vec` |
+| `block.row_expand_sub` | `tile[M,N], tile[M,1]` | `tile[M,N]` | 第二个输入 [M,1] | `tile - row_vec` |
+| `block.row_expand_mul` | `tile[M,N], tile[M,1]` | `tile[M,N]` | 第二个输入 [M,1] | `tile * row_vec` |
+| `block.row_expand_div` | `tile[M,N], tile[M,1]` | `tile[M,N]` | 第二个输入 [M,1]，避免除零 | `tile / row_vec` |
+
+#### 5. Block Matrix Operations (高级)
+| 算子名 | 输入类型 | 输出类型 | 形状约束 | NumPy等价 |
+|--------|----------|----------|----------|-----------|
+| `block.matmul` | `tile, tile` | `tile` | `[M, K] @ [K, N] -> [M, N]` | `a @ b` |
+
+### 数据约束
+
+1. **避免除零**: `div`, `divs`, `recip`, `row_expand_div`
+   - 确保分母绝对值 ≥ 0.01
+
+2. **正值约束**: `sqrt`, `rsqrt`, `log`
+   - 确保输入 > 0 或使用 `abs(x) + 1e-6`
+
+3. **范围约束**: `exp`
+   - 建议输入范围 [-10, 10] 避免溢出
+
+### 常见算子组合模式
+
+#### Softmax 组件
+```python
+# Step 1: Row max reduction
+max_vals = pl.row_max(tile, tmp_tile)  # [M,N] -> [M,1]
+
+# Step 2: Subtract max (数值稳定性)
 centered = pl.row_expand_sub(tile, max_vals)
-# 3. Exponential
+
+# Step 3: Exponential
 exp_vals = pl.exp(centered)
-# 4. Row sum
+
+# Step 4: Row sum
 sum_vals = pl.row_sum(exp_vals, tmp_tile)
-# 5. Normalize
+
+# Step 5: Normalize
 output = pl.row_expand_div(exp_vals, sum_vals)
 ```
 
@@ -227,48 +409,64 @@ neg_part = pl.muls(tile, 0.01)
 output = pl.maximum(tile, neg_part)
 ```
 
-更多模式请参考 [OP_RULES.md](OP_RULES.md)。
+---
 
-## 命令行参数
+## 使用示例
 
 ### 生成测试用例
 
 ```bash
-python src/fuzzer/example_multi_kernel.py [选项]
+# 使用默认配置生成所有测试用例
+python src/fuzzer/example_multi_kernel.py
 
-选项:
-  --num-cases N    生成的测试用例数量 (1-5，默认: 1)
-  --output PATH    输出文件路径
-  --seed N         随机种子
+# 只生成第一个配置
+python src/fuzzer/example_multi_kernel.py --config-index 0
+
+# 设置误差容忍度
+python src/fuzzer/example_multi_kernel.py --atol 1e-3 --rtol 1e-3
+
+# 指定输出文件
+python src/fuzzer/example_multi_kernel.py --output my_tests.py
+
+# 组合使用
+python src/fuzzer/example_multi_kernel.py --config-index 1 --atol 1e-4 --rtol 1e-4 --output my_test.py
 ```
 
 ### 运行测试
 
 ```bash
-pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py [选项]
+# 运行所有测试
+pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v
 
-常用选项:
-  -v                    显示详细输出
-  -s                    显示 print 输出
-  --codegen-only        只生成代码，不执行
-  --platform=PLATFORM   指定平台（如 a2a3sim）
-  --device=N            指定设备编号
-  --save-kernels        保存生成的 C++ 代码
-  --kernels-dir=DIR     指定保存目录
-  --dump-passes         打印编译器优化 pass
+# 只生成代码，不执行
+pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only
+
+# 保存生成的 C++ 代码
+pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py -v --codegen-only --save-kernels --kernels-dir=/tmp/kernels
+
+# 运行特定测试
+pytest src/fuzzer/generated_tests/test_fuzz_multi_kernel.py::TestMultiKernelFuzzing::test_fuzz_sequential_simple -v
 ```
 
-## 生成的代码结构
+### 生成的代码结构
 
 ```python
 class TestFuzzSequentialSimple(PTOTestCase):
+    rows = 128
+    cols = 128
+
+    def __init__(self):
+        super().__init__()
+        self.config.atol = 1e-4
+        self.config.rtol = 1e-4
+
     def get_name(self):
         return "fuzz_sequential_simple"
 
     def define_tensors(self):
         return [
-            TensorSpec('a', [128, 128], DataType.FP32, is_input=True),
-            TensorSpec('b', [128, 128], DataType.FP32, is_input=True),
+            TensorSpec('a', [128, 128], DataType.FP32, init_value=2.0),
+            TensorSpec('b', [128, 128], DataType.FP32, init_value=2.5),
             TensorSpec('output', [128, 128], DataType.FP32, is_output=True),
         ]
 
@@ -288,40 +486,45 @@ class TestFuzzSequentialSimple(PTOTestCase):
         return Program
 
     def compute_expected(self, tensors, params=None):
-        # NumPy 参考实现
+        # PyTorch 参考实现
         pass
 ```
 
-## 扩展框架
+---
 
-### 添加新操作符
+## 更新日志
 
-编辑 [fuzzer.py](fuzzer.py) 的 `OpFuzzer.__init__` 方法：
+### 最新更新
 
-```python
-# 在 OpFuzzer.__init__ 中
-self.ops = self.BLOCK_BINARY_OPS + self.BLOCK_SCALAR_OPS + self.BLOCK_UNARY_OPS
+#### 新增功能
+- 支持多种张量初始化类型：constant, random, range, normal, ones, zeros
+- 支持从单个配置生成多个测试实例（通过 `num_instances` 字段）
+- 新增 `--config-index` 命令行参数，可以指定只生成某个配置的测试用例
+- 新增 `--atol` 和 `--rtol` 命令行参数，支持设置误差容忍度
+- 将所有配置参数移至 `all_configs` 结构，统一管理
 
-# 或者自定义操作集合
-custom_ops = [
-    OpSpec("block.add", ["tile", "tile"], "tile", {}, lambda a, b: a + b),
-    OpSpec("block.maximum", ["tile", "tile"], "tile", {}, lambda a, b: np.maximum(a, b)),
-    OpSpec("block.sqrt", ["tile"], "tile", {"positive_only": True}, lambda a: np.sqrt(a)),
-]
-self.ops = custom_ops
-```
+#### 重要变更
+- 将所有 golden 数据生成从 NumPy 替换为 PyTorch
+  - `_generate_numpy_reference` 重命名为 `_generate_torch_reference`
+  - `_get_numpy_operation` 重命名为 `_get_torch_operation`
+  - 所有中间计算使用 PyTorch 张量操作
 
-### 添加新组合模式
+- 简化命令行参数
+  - 移除 `--num-cases`、`--seed`、`--enable-advanced-ops`、`--tensor-init` 参数
+  - 所有配置现在通过 `all_configs` 结构管理
+  - 保留 `--output`、`--config-index`、`--atol`、`--rtol` 参数
 
-在 [orchestrator_generator.py](orchestrator_generator.py) 中添加新的生成方法。
+#### 修复
+- 修复生成的 golden.py 文件中缺少 torch 导入的问题
+
+---
 
 ## 注意事项
 
 1. **32字节对齐约束**: 所有 tensor 创建和 reshape 操作的形状必须满足32字节对齐
-   - 形状尾轴(列数)必须是 1，或 `(cols * sizeof(dtype)) % 32 == 0`
+   - 形状尾轴（列数）必须是 1，或 `(cols * sizeof(dtype)) % 32 == 0`
    - FP32 类型有效的列数: 1, 8, 16, 24, 32, 40, 48, 56, 64, ..., 128, ...
    - Fuzzer 会自动验证并修正不对齐的形状
-   - 详见 [OP_RULES.md](OP_RULES.md) 第 0 节
 
 2. **张量形状**: 支持不同维度的输入张量，可以在配置中指定每个内核的输入形状
 
@@ -333,8 +536,31 @@ self.ops = custom_ops
 
 6. **输入数量**: 每个内核支持 1-3 个输入张量，可以在配置中指定
 
+---
+
+## 扩展框架
+
+### 添加新操作符
+
+编辑 `fuzzer.py` 的 `OpFuzzer.__init__` 方法：
+
+```python
+# 在 OpFuzzer.__init__ 中
+custom_ops = [
+    OpSpec("block.custom_op", ["tile", "tile"], "tile", {},
+           lambda a, b: custom_numpy_impl(a, b)),
+]
+self.ops = self.ops + custom_ops
+```
+
+### 添加新组合模式
+
+在 `orchestrator_generator.py` 中添加新的生成方法。
+
+---
+
 ## 参考文件
 
 - [tests/test_cases/test_matmul.py](../../tests/test_cases/test_matmul.py): PTOTestCase 使用模式
 - [src/fuzzer/src/fuzzer.py](src/fuzzer.py): OpFuzzer 操作生成逻辑和操作符定义
-- [example_multi_kernel.py](example_multi_kernel.py): 配置示例，包括如何指定不同维度的输入
+- [example_multi_kernel.py](example_multi_kernel.py): 配置示例
